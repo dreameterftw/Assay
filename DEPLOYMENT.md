@@ -20,7 +20,7 @@ The region choice is for latency and primary data location, not a compliance gua
 2. Review and apply `supabase/migrations/202611160001_phase1_foundation.sql` in a non-production environment.
 3. Run `supabase/tests/phase1_rls.sql` against that environment, using an available hosted test route; Docker is not required for hosted SQL execution.
 4. Verify multi-organization access, comments, finding decisions, reviewer routing, and audit history after the migration is applied. Invitation acceptance and delivery still need implementation.
-5. Add private object storage, signed URLs, upload limits/scanning, and retention controls before enabling uploads.
+5. The migration provisions a private image bucket (PNG/JPEG/WebP, 5 MB), review-linked metadata, and signed URLs. Uploads are enabled after the migration is applied. Malware scanning, lifecycle retention, and deletion controls still need operational setup before confidential production use.
 6. Confirm the Vercel account/scope, link this repository, and set only `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` for browser code. Keep service-role and AI secrets server-side.
 7. Exercise fresh sign-up and a multi-account review cycle in Preview before promoting anything to Production.
 

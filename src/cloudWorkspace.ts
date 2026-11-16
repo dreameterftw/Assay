@@ -45,6 +45,21 @@ export async function loadOrCreateWorkspace(user: User, selectedOrganizationId?:
   if (reviewsResult.error) throw reviewsResult.error
 
   const reviewIds = (reviewsResult.data ?? []).map((row) => row.id)
+  const assetsResult = reviewIds.length
+    ? await supabase.from('review_assets').select('*').eq('organization_id', org.id).in('review_id', reviewIds).order('created_at')
+    : { data: [], error: null }
+  if (assetsResult.error) throw assetsResult.error
+  const imagesByReview = new Map<string, NonNullable<Review['image']>>()
+  const storage = supabase
+  await Promise.all((assetsResult.data ?? []).map(async (asset) => {
+    const { data: signed, error } = await storage.storage.from(asset.bucket_id).createSignedUrl(asset.object_path, 3600)
+    if (error) throw error
+    imagesByReview.set(asset.review_id, {
+      assetId: asset.id, storagePath: asset.object_path, name: asset.filename,
+      dataUrl: signed.signedUrl, width: asset.width, height: asset.height,
+      altText: asset.alt_text, palette: Array.isArray(asset.palette) ? asset.palette : [],
+    })
+  }))
   const [findingsResult, commentsResult, eventsResult, revisionsResult, decisionsResult] = reviewIds.length ? await Promise.all([
     supabase.from('review_findings').select('*').in('review_id', reviewIds).order('created_at'),
     supabase.from('review_comments').select('*').in('review_id', reviewIds).order('created_at'),
@@ -117,6 +132,7 @@ export async function loadOrCreateWorkspace(user: User, selectedOrganizationId?:
       initials: (row.created_by === user.id ? user.email ?? 'You' : 'W').slice(0, 2).toUpperCase(),
       time: new Date(row.created_at).toLocaleDateString(),
       status: fromReviewStatus(row.status), findings: findingsByReview.get(row.id) ?? [], content: row.content,
+      image: imagesByReview.get(row.id),
       reviewer: row.assigned_reviewer ? `${roleByUser.get(row.assigned_reviewer) ?? 'Reviewer'} · ${row.assigned_reviewer.slice(0, 8)}` : undefined,
       riskTier: titleCase(row.risk_tier) as Review['riskTier'],
       assignedReviewerId: row.assigned_reviewer ?? undefined,

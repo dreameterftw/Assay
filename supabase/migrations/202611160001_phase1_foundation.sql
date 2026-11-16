@@ -248,6 +248,27 @@ create table public.review_decisions (
   foreign key (organization_id, review_id) references public.reviews(organization_id, id) on delete restrict
 );
 
+create table public.review_assets (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null,
+  review_id uuid not null,
+  bucket_id text not null default 'assay-review-assets' check (bucket_id = 'assay-review-assets'),
+  object_path text not null unique,
+  filename text not null check (length(filename) between 1 and 255),
+  mime_type text not null check (mime_type in ('image/png','image/jpeg','image/webp')),
+  size_bytes bigint not null check (size_bytes between 1 and 5242880),
+  width integer not null check (width between 1 and 50000),
+  height integer not null check (height between 1 and 50000),
+  palette jsonb not null default '[]'::jsonb check (jsonb_typeof(palette) = 'array' and jsonb_array_length(palette) <= 5),
+  alt_text text not null default '' check (octet_length(alt_text) <= 2000),
+  uploaded_by uuid not null references auth.users(id) on delete restrict,
+  created_at timestamptz not null default now(),
+  unique (organization_id, id),
+  foreign key (organization_id, review_id) references public.reviews(organization_id, id) on delete restrict,
+  check (object_path = organization_id::text || '/' || review_id::text || '/' || uploaded_by::text || '/' || id::text || '.' ||
+    case mime_type when 'image/png' then 'png' when 'image/jpeg' then 'jpg' when 'image/webp' then 'webp' end)
+);
+
 create table public.review_revisions (
   id uuid primary key default gen_random_uuid(),
   organization_id uuid not null,
@@ -291,6 +312,34 @@ $$;
 revoke all on function private.assay_record_finding_decision() from public, anon, authenticated;
 create trigger review_decisions_record_event after insert on public.review_decisions
   for each row execute function private.assay_record_finding_decision();
+
+create function private.assay_record_asset_event()
+returns trigger language plpgsql security definer set search_path = '' as $$
+declare asset_row public.review_assets; action_name text; actor uuid;
+begin
+  if tg_op='DELETE' then asset_row := old; action_name := 'asset_removed'; actor := coalesce((select auth.uid()),old.uploaded_by);
+  elsif tg_op='INSERT' then asset_row := new; action_name := 'asset_uploaded'; actor := coalesce((select auth.uid()),new.uploaded_by);
+  else
+    asset_row := new;
+    if new.alt_text is not distinct from old.alt_text then return new; end if;
+    action_name := 'asset_alt_text_updated'; actor := coalesce((select auth.uid()),new.uploaded_by);
+  end if;
+  insert into public.review_events(organization_id,review_id,actor_id,action,detail,rule_set_version)
+  values (asset_row.organization_id,asset_row.review_id,actor,action_name,
+    jsonb_build_object('asset_id',asset_row.id,'filename',asset_row.filename,'alt_text',asset_row.alt_text),
+    coalesce((select r.rule_set_version from public.reviews r where r.organization_id=asset_row.organization_id and r.id=asset_row.review_id),1));
+  if tg_op='DELETE' then return old; end if;
+  return new;
+end;
+$$;
+revoke all on function private.assay_record_asset_event() from public, anon, authenticated;
+create trigger review_assets_record_event after insert or update or delete on public.review_assets
+  for each row execute function private.assay_record_asset_event();
+
+insert into storage.buckets(id,name,public,file_size_limit,allowed_mime_types)
+values ('assay-review-assets','assay-review-assets',false,5242880,array['image/png','image/jpeg','image/webp'])
+on conflict (id) do update set public=false,file_size_limit=excluded.file_size_limit,allowed_mime_types=excluded.allowed_mime_types;
+alter table storage.objects enable row level security;
 
 create function private.assay_touch_updated_at()
 returns trigger language plpgsql set search_path = '' as $$
@@ -595,6 +644,7 @@ alter table public.review_comments enable row level security;
 alter table public.review_events enable row level security;
 alter table public.review_revisions enable row level security;
 alter table public.review_decisions enable row level security;
+alter table public.review_assets enable row level security;
 alter table public.organization_events enable row level security;
 
 create policy organizations_select_member on public.organizations for select to authenticated
@@ -688,12 +738,57 @@ create policy decisions_insert_actor on public.review_decisions for insert to au
       and r.status not in ('approved','waived') and r.archived_at is null
       and (r.created_by = (select auth.uid()) or private.assay_has_role(r.organization_id,
         array['admin','manager','brand_reviewer','legal_reviewer']::public.assay_role[]))));
+create policy assets_select_review on public.review_assets for select to authenticated
+  using (exists (select 1 from public.reviews r where r.organization_id=review_assets.organization_id
+    and r.id=review_assets.review_id and private.assay_can_view_review(r.organization_id,r.created_by,r.assigned_reviewer)));
+create policy assets_insert_uploader on public.review_assets for insert to authenticated
+  with check (uploaded_by=(select auth.uid()) and exists (select 1 from public.reviews r
+    where r.organization_id=review_assets.organization_id and r.id=review_assets.review_id
+      and r.status not in ('approved','waived') and r.archived_at is null
+      and private.assay_can_view_review(r.organization_id,r.created_by,r.assigned_reviewer)));
+create policy assets_update_alt on public.review_assets for update to authenticated
+  using ((uploaded_by=(select auth.uid()) or private.assay_has_role(organization_id,array['admin']::public.assay_role[]))
+    and exists (select 1 from public.reviews r where r.organization_id=review_assets.organization_id
+      and r.id=review_assets.review_id and r.status not in ('approved','waived') and r.archived_at is null
+      and private.assay_can_view_review(r.organization_id,r.created_by,r.assigned_reviewer)))
+  with check ((uploaded_by=(select auth.uid()) or private.assay_has_role(organization_id,array['admin']::public.assay_role[]))
+    and exists (select 1 from public.reviews r where r.organization_id=review_assets.organization_id
+      and r.id=review_assets.review_id and r.status not in ('approved','waived') and r.archived_at is null
+      and private.assay_can_view_review(r.organization_id,r.created_by,r.assigned_reviewer)));
+create policy assets_delete_owner on public.review_assets for delete to authenticated
+  using ((uploaded_by=(select auth.uid()) or private.assay_has_role(organization_id,array['admin']::public.assay_role[]))
+    and exists (select 1 from public.reviews r where r.organization_id=review_assets.organization_id
+      and r.id=review_assets.review_id and r.status not in ('approved','waived') and r.archived_at is null));
 create policy organization_events_select_admin on public.organization_events for select to authenticated
   using (private.assay_has_role(organization_id, array['admin']::public.assay_role[]));
 
+create policy review_assets_storage_select on storage.objects for select to authenticated
+  using (bucket_id='assay-review-assets' and exists (
+    select 1 from public.review_assets a join public.reviews r
+      on r.organization_id=a.organization_id and r.id=a.review_id
+    where a.bucket_id=storage.objects.bucket_id and a.object_path=storage.objects.name
+      and private.assay_can_view_review(r.organization_id,r.created_by,r.assigned_reviewer)
+  ));
+create policy review_assets_storage_insert on storage.objects for insert to authenticated
+  with check (bucket_id='assay-review-assets' and exists (
+    select 1 from public.review_assets a join public.reviews r
+      on r.organization_id=a.organization_id and r.id=a.review_id
+    where a.bucket_id=storage.objects.bucket_id and a.object_path=storage.objects.name
+      and r.status not in ('approved','waived') and r.archived_at is null
+      and a.uploaded_by=(select auth.uid()) and private.assay_can_view_review(r.organization_id,r.created_by,r.assigned_reviewer)
+  ));
+create policy review_assets_storage_delete on storage.objects for delete to authenticated
+  using (bucket_id='assay-review-assets' and exists (
+    select 1 from public.review_assets a
+    where a.bucket_id=storage.objects.bucket_id and a.object_path=storage.objects.name
+      and (a.uploaded_by=(select auth.uid()) or private.assay_has_role(a.organization_id,array['admin']::public.assay_role[]))
+      and exists (select 1 from public.reviews r where r.organization_id=a.organization_id and r.id=a.review_id
+        and r.status not in ('approved','waived') and r.archived_at is null)
+  ));
+
 revoke all on public.organizations, public.organization_members, public.workspace_invitations,
   public.brand_rules, public.approved_claims, public.reviews, public.review_findings,
-  public.review_comments, public.review_events, public.review_revisions, public.review_decisions, public.organization_events from public, anon, authenticated;
+  public.review_comments, public.review_events, public.review_revisions, public.review_decisions, public.review_assets, public.organization_events from public, anon, authenticated;
 grant select, insert on public.organizations to authenticated;
 grant update (name) on public.organizations to authenticated;
 grant select, delete on public.organization_members to authenticated;
@@ -703,6 +798,8 @@ grant select, insert, update on public.brand_rules, public.approved_claims to au
 grant select, insert, update on public.reviews to authenticated;
 grant select on public.review_findings, public.review_events, public.review_revisions, public.review_decisions to authenticated;
 grant insert on public.review_decisions to authenticated;
+grant select, insert, delete on public.review_assets to authenticated;
+grant update (alt_text) on public.review_assets to authenticated;
 grant select, insert on public.review_comments to authenticated;
 grant select on public.organization_events to authenticated;
 
@@ -713,4 +810,5 @@ create index reviews_org_status_created on public.reviews(organization_id, statu
 create index findings_org_review on public.review_findings(organization_id, review_id, created_at desc);
 create index comments_org_review on public.review_comments(organization_id, review_id, created_at);
 create index events_org_review on public.review_events(organization_id, review_id, created_at desc);
+create index assets_org_review on public.review_assets(organization_id, review_id, created_at);
 

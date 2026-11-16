@@ -9,7 +9,7 @@ import { clearLegacyWorkspaceMirror, type AssayData } from './storage'
 import { findingKey, runDeterministicChecks } from './checks'
 import { validateSuggestion } from './aiReview'
 import type { Review, BrandRule, ApprovedClaim, Finding, ReviewerRole, ReviewRevision, ReviewDecision } from './types'
-import { checkImageMetadata } from './imageChecks'
+import { checkImageMetadata, inspectImage } from './imageChecks'
 import { buildRadar } from './insights'
 import { supabase } from './supabase'
 import { loadOrCreateWorkspace, saveWorkspaceData, type CloudWorkspace } from './cloudWorkspace'
@@ -59,7 +59,7 @@ function WorkspaceApp({ initialData, workspace, userEmail, syncStatus, onDataCha
   const [commentText, setCommentText] = useState('')
   const [passportOpen, setPassportOpen] = useState(false)
   const [revisionOpen, setRevisionOpen] = useState(false)
-  const imageBusy = false
+  const [imageBusy, setImageBusy] = useState(false)
   const [regressionText, setRegressionText] = useState('')
   const [regressionResults, setRegressionResults] = useState<{ reviewId: string; title: string; added: Finding[] }[] | null>(null)
   const [backupInput, setBackupInput] = useState<HTMLInputElement | null>(null)
@@ -284,18 +284,80 @@ function WorkspaceApp({ initialData, workspace, userEmail, syncStatus, onDataCha
 
   async function attachImage(file?: File) {
     if (!file) return
-    setNotice('Image reviews are unavailable until private Supabase Storage and signed URLs are configured.')
-    window.setTimeout(() => setNotice(''), 4000)
+    if (!supabase || !active.id || active.image) return
+    setImageBusy(true)
+    const assetId = crypto.randomUUID()
+    const extension = file.type === 'image/jpeg' ? 'jpg' : file.type === 'image/png' ? 'png' : file.type === 'image/webp' ? 'webp' : ''
+    const objectPath = `${workspace.id}/${active.id}/${workspace.currentUserId}/${assetId}.${extension}`
+    let metadataCreated = false
+    let objectUploaded = false
+    try {
+      if (!extension) throw new Error('Choose a PNG, JPEG, or WebP image.')
+      const inspected = await inspectImage(file)
+      const { error: metadataError } = await supabase.from('review_assets').insert({
+        id: assetId, organization_id: workspace.id, review_id: active.id,
+        bucket_id: 'assay-review-assets', object_path: objectPath, filename: file.name,
+        mime_type: file.type, size_bytes: file.size, width: inspected.width, height: inspected.height,
+        alt_text: inspected.altText, palette: inspected.palette, uploaded_by: workspace.currentUserId,
+      })
+      if (metadataError) throw metadataError
+      metadataCreated = true
+      const { error: uploadError } = await supabase.storage.from('assay-review-assets').upload(objectPath, file, { contentType: file.type, upsert: false })
+      if (uploadError) throw uploadError
+      objectUploaded = true
+      const { data: signed, error: signedError } = await supabase.storage.from('assay-review-assets').createSignedUrl(objectPath, 3600)
+      if (signedError) throw signedError
+      const image: NonNullable<Review['image']> = { ...inspected, assetId, storagePath: objectPath, dataUrl: signed.signedUrl }
+      const findings = [...active.findings.filter((finding) => finding.origin !== 'image'), ...checkImageMetadata(image, brandPalette)]
+      setReviews(reviews.map((review) => review.id === active.id ? { ...review, image, findings } : review))
+      await refreshReviewHistory(active.id)
+      setNotice('Image uploaded to private workspace storage.')
+    } catch (error) {
+      if (objectUploaded) await supabase.storage.from('assay-review-assets').remove([objectPath])
+      if (metadataCreated) await supabase.from('review_assets').delete().eq('organization_id', workspace.id).eq('id', assetId)
+      setNotice(error instanceof Error ? error.message : 'Image upload failed. Try again.')
+    } finally {
+      setImageBusy(false)
+      window.setTimeout(() => setNotice(''), 4000)
+    }
   }
 
-  function updateImageAlt(altText: string) {
-    if (!active.image) return
+  async function updateImageAlt(altText: string) {
+    if (!active.image?.assetId || !supabase) return
+    const { error } = await supabase.from('review_assets').update({ alt_text: altText }).eq('organization_id', workspace.id).eq('id', active.image.assetId)
+    if (error) { setNotice(`Could not save alt text: ${error.message}`); return }
     const image = { ...active.image, altText }
     const imageFindings = checkImageMetadata(image, brandPalette)
-    const nextReview = { ...active, image, findings: [...active.findings.filter((finding) => !finding.id.startsWith('image-')), ...imageFindings] }
+    const nextReview = { ...active, image, findings: [...active.findings.filter((finding) => finding.origin !== 'image'), ...imageFindings] }
     const nextReviews = reviews.map((review) => review.id === active.id ? nextReview : review)
     setReviews(nextReviews)
-    persist(nextReviews)
+    await refreshReviewHistory(active.id)
+  }
+
+  async function removeImage() {
+    if (!active.image?.assetId || !active.image.storagePath || !supabase) return
+    if (['Approved', 'Waived', 'Archived'].includes(active.status)) {
+      setNotice('Images on finalized reviews are retained with the audit record.')
+      window.setTimeout(() => setNotice(''), 3500)
+      return
+    }
+    setImageBusy(true)
+    try {
+      const { error: storageError } = await supabase.storage.from('assay-review-assets').remove([active.image.storagePath])
+      if (storageError) throw storageError
+      const { error: metadataError } = await supabase.from('review_assets').delete().eq('organization_id', workspace.id).eq('id', active.image.assetId)
+      if (metadataError) throw metadataError
+      setReviews(reviews.map((review) => review.id === active.id
+        ? { ...review, image: undefined, findings: review.findings.filter((finding) => finding.origin !== 'image') }
+        : review))
+      await refreshReviewHistory(active.id)
+      setNotice('Image removed from the review.')
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Could not remove the image.')
+    } finally {
+      setImageBusy(false)
+      window.setTimeout(() => setNotice(''), 3500)
+    }
   }
 
   async function routeForReview() {
@@ -439,7 +501,7 @@ function WorkspaceApp({ initialData, workspace, userEmail, syncStatus, onDataCha
                 <div className="detail-actions"><label className="intent-field"><span>Creator intent (not saved yet)</span><input disabled value={active.intent ?? intent} aria-label="Creator intent" /></label><button className="primary-button approve-button" onClick={() => { void approveReview() }} disabled={!canApproveActive} title={canApproveActive ? 'Approve this review' : 'Approval requires an authorized reviewer, another person than the submitter, and completed finding decisions'}><Check size={16} /> Approve review</button></div>
                 <div className="workflow-strip"><span className={`risk-badge ${(active.riskTier ?? 'Standard').toLowerCase()}`}><ShieldCheck size={13} /> {active.riskTier ?? 'Risk not routed'}</span><span><Route size={13} /> {active.assignedReviewerId ? `${active.reviewer ?? 'Reviewer'} · ${active.assignedReviewerId.slice(0, 8)}` : 'No reviewer assigned'}</span>{canReviewWorkflow && <><select aria-label="Assign reviewer" value={assignedMemberId || active.assignedReviewerId || ''} onChange={(event) => setAssignedMemberId(event.target.value)}><option value="">Choose reviewer…</option>{eligibleReviewers.map((member) => <option key={member.userId} value={member.userId}>{member.role} · {member.userId.slice(0, 8)}</option>)}</select><button disabled={!eligibleReviewers.length || !['Needs review', 'In review'].includes(active.status)} onClick={() => { void routeForReview() }}><ArrowRight size={13} /> Route</button></>}{(active.revisions?.length ?? 0) > 0 && <button onClick={() => setRevisionOpen((open) => !open)}><History size={13} /> History</button>}{active.status === 'Approved' && <button onClick={() => setPassportOpen(true)}><FileCheck2 size={13} /> Passport</button>}</div>
                 <div className="finding-summary"><div><span className="summary-number">{active.findings.filter((finding) => finding.level === 'Needs review' && !finding.decision).length}</span><span>needs review</span></div><div className="summary-separator" /><div><span className="summary-number watch-number">{active.findings.filter((finding) => finding.level === 'Watch' && !finding.decision).length}</span><span>to consider</span></div><div className="summary-spacer" /><span className="source-assurance"><ShieldCheck size={15} /> Evidence linked</span></div>
-                <ImageAttachment image={active.image} busy={imageBusy} onFile={attachImage} onAlt={updateImageAlt} onRemove={() => { const nextReviews = reviews.map((review) => review.id === active.id ? { ...review, image: undefined, findings: review.findings.filter((finding) => finding.origin !== 'image') } : review); setReviews(nextReviews); persist(nextReviews) }} />
+                <ImageAttachment image={active.image} busy={imageBusy} editable={!['Approved', 'Waived', 'Archived'].includes(active.status)} onFile={(file) => { void attachImage(file) }} onAlt={(value) => { void updateImageAlt(value) }} onRemove={() => { void removeImage() }} />
                 <div className="findings-list">{active.findings.map((finding) => <FindingCard key={finding.id} finding={finding} onResolve={(action, reason) => updateFinding(active.id, finding.id, action, reason)} onPreviewSuggestion={previewSuggestion} onAcceptSuggestion={acceptSuggestion} decisionsEnabled />)}{active.findings.length === 0 && <div className="all-clear"><span className="all-clear-icon"><Check size={18} /></span><div><strong>No deterministic flags found</strong><p>This is a local deterministic pass and does not assess tone or certify factual accuracy.</p></div></div>}</div>
                 {suggestionChecks.length > 0 && <div className="suggestion-check-result"><strong>Fix check found {suggestionChecks.length} issue{suggestionChecks.length === 1 ? '' : 's'}:</strong>{suggestionChecks.map((finding) => <span key={finding.id}>{finding.title}</span>)}</div>}
                 {revisionOpen && <div className="history-panel"><div className="panel-title"><History size={14} /> Revision history</div>{(active.revisions ?? []).length ? active.revisions?.map((revision) => <div className="history-entry" key={revision.id}><div><strong>{revision.label}</strong><span>{revision.author} · {new Date(revision.createdAt).toLocaleString()}</span><p>{revision.content}</p></div><button onClick={() => { updateReview(active.id, (review) => ({ ...review, content: revision.content, findings: applyFindingDecisions(runDeterministicChecks(revision.content, rules, claims, today), review.decisions) })); setNotice('Revision restored.') }}>Restore</button></div>) : <p className="empty-history">No content revisions yet.</p>}</div>}
@@ -593,8 +655,10 @@ function PassportModal({ review, onClose, onExport }: { review: Review; onClose:
   return <div className="modal-backdrop" role="presentation" onClick={onClose}><section className="passport-modal" role="dialog" aria-modal="true" aria-labelledby="passport-title" onClick={(event) => event.stopPropagation()}><div className="passport-head"><div><span className="passport-mark"><ShieldCheck size={18} /></span><div><div className="brain-overline">PUBLISH READINESS RECORD</div><h2 id="passport-title">Review passport</h2></div></div><button className="icon-button" aria-label="Close passport" onClick={onClose}>×</button></div><div className="passport-status"><span className={`risk-badge ${(review.riskTier ?? 'Standard').toLowerCase()}`}><ShieldCheck size={13} /> {review.status}</span><span>{review.id} · Rule set v{review.ruleSetVersion ?? 1}</span></div><div className="passport-fields"><div><small>Content</small><strong>{review.title}</strong></div><div><small>Submitted by</small><strong>{review.owner}</strong></div><div><small>Reviewer</small><strong>{review.reviewer ?? 'Not assigned'}</strong></div><div><small>Risk tier</small><strong>{review.riskTier ?? 'Not assessed'}</strong></div><div><small>Findings resolved</small><strong>{resolved} decisions · {openFindings} open findings</strong></div><div><small>Rules recorded</small><strong>{review.ruleSnapshot?.length ?? 0} versioned rules</strong></div></div><div className="passport-copy"><small>Reviewed content snapshot</small><p>{review.content}</p></div><div className="passport-disclosure"><ShieldCheck size={14} /> AI review is disabled. This record contains deterministic checks and human decisions; it is not a cryptographic signature.</div><div className="passport-footer"><span>Generated {new Date(review.passportCreatedAt ?? Date.now()).toLocaleString()}</span><button className="primary-button" onClick={onExport}><Download size={14} /> Export JSON</button></div></section></div>
 }
 
-function ImageAttachment({ image, busy, onFile, onAlt, onRemove }: { image?: Review['image']; busy: boolean; onFile: (file?: File) => void; onAlt: (value: string) => void; onRemove: () => void }) {
-  return <section className="image-attachment"><div className="panel-title"><ImagePlus size={14} /> Campaign image <span className="image-local-label">WORKSPACE DATA</span></div>{image ? <div className="attached-image"><img src={image.dataUrl} alt={image.altText || ''} /><div className="attached-image-details"><div className="image-meta-line"><strong>{image.name}</strong><span>{image.width} × {image.height}px</span><button onClick={onRemove} aria-label="Remove image"><X size={13} /></button></div><label className="alt-input"><span>Alt text</span><input value={image.altText} onChange={(event) => onAlt(event.target.value)} placeholder="Describe the image for someone who cannot see it" /></label><div className="palette-row"><span>Dominant colors</span>{image.palette.slice(0, 5).map((color) => <i key={color} title={color} style={{ backgroundColor: color }} />)}</div><p>Checks cover alt text, image dimensions, and basic palette distance only.</p></div></div> : <label className={`image-drop ${busy ? 'busy' : ''}`}><input type="file" accept="image/png,image/jpeg,image/webp" disabled={busy} onChange={(event) => { onFile(event.target.files?.[0]); event.currentTarget.value = '' }} /><ImagePlus size={18} /><span>{busy ? 'Inspecting image…' : 'Add a campaign image'}</span><small>PNG, JPG, or WebP · up to 5 MB · stored in your workspace</small></label>}</section>
+function ImageAttachment({ image, busy, editable, onFile, onAlt, onRemove }: { image?: Review['image']; busy: boolean; editable: boolean; onFile: (file?: File) => void; onAlt: (value: string) => void; onRemove: () => void }) {
+  const [altText, setAltText] = useState(image?.altText ?? '')
+  useEffect(() => setAltText(image?.altText ?? ''), [image?.assetId, image?.altText])
+  return <section className="image-attachment"><div className="panel-title"><ImagePlus size={14} /> Campaign image <span className="image-local-label">PRIVATE STORAGE</span></div>{image ? <div className="attached-image"><img src={image.dataUrl} alt={altText || ''} /><div className="attached-image-details"><div className="image-meta-line"><strong>{image.name}</strong><span>{image.width} × {image.height}px</span>{editable && <button disabled={busy} onClick={onRemove} aria-label="Remove image"><X size={13} /></button>}</div><label className="alt-input"><span>Alt text</span><input disabled={!editable || busy} value={altText} onChange={(event) => setAltText(event.target.value)} onBlur={() => { if (altText !== image.altText) onAlt(altText) }} placeholder="Describe the image for someone who cannot see it" /></label><div className="palette-row"><span>Dominant colors</span>{image.palette.slice(0, 5).map((color) => <i key={color} title={color} style={{ backgroundColor: color }} />)}</div><p>Checks cover alt text, image dimensions, and basic palette distance only.</p></div></div> : editable ? <label className={`image-drop ${busy ? 'busy' : ''}`}><input type="file" accept="image/png,image/jpeg,image/webp" disabled={busy} onChange={(event) => { onFile(event.target.files?.[0]); event.currentTarget.value = '' }} /><ImagePlus size={18} /><span>{busy ? 'Inspecting image…' : 'Add a campaign image'}</span><small>PNG, JPG, or WebP · up to 5 MB · stored in your workspace</small></label> : <p className="empty-history">No campaign image is attached.</p>}</section>
 }
 
 function RadarView({ radar, onFocusReview }: { radar: ReturnType<typeof buildRadar>; onFocusReview: (id: string) => void }) {

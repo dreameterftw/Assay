@@ -35,7 +35,7 @@ export type Review = {
   passportCreatedAt?: string
   ruleSetVersion?: number
   ruleSnapshot?: { rule_id: string; rule_key: string; version: number }[]
-  image?: { name: string; dataUrl: string; width: number; height: number; altText: string; palette: string[] }
+  image?: { name: string; dataUrl: string; width: number; height: number; altText: string; palette: string[]; assetId?: string; storagePath?: string }
 }
 
 export type ReviewComment = { id: string; author: string; role: ReviewerRole; text: string; createdAt: string; anchor?: string }

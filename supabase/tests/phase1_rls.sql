@@ -56,12 +56,23 @@ values
  ('a8000000-0000-4000-8000-000000000001','a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000002','10000000-0000-4000-8000-000000000003','Private manager snapshot','initial'),
  ('a8000000-0000-4000-8000-000000000005','a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000005','10000000-0000-4000-8000-000000000003','Assigned snapshot','initial');
 
+do $$
+begin
+  if not exists (select 1 from storage.buckets where id='assay-review-assets' and public=false
+    and file_size_limit=5242880 and allowed_mime_types @> array['image/png','image/jpeg','image/webp']) then
+    raise exception 'Private review asset bucket is missing or misconfigured';
+  end if;
+  if not (select c.relrowsecurity from pg_class c where c.oid='storage.objects'::regclass) then
+    raise exception 'Storage object RLS is not enabled';
+  end if;
+end $$;
+
 set local role authenticated;
 do $$
 declare actor record; table_name text; visible_count bigint; changed_count bigint; denied boolean;
-  target_org uuid;
+  target_org uuid; asset_review_id uuid; asset_id uuid;
   table_names text[] := array['organizations','organization_members','workspace_invitations','brand_rules',
-    'approved_claims','reviews','review_findings','review_comments','review_events','review_revisions','review_decisions','organization_events'];
+    'approved_claims','reviews','review_findings','review_comments','review_events','review_revisions','review_decisions','review_assets','organization_events'];
 begin
   -- Cross-organization reads/writes for all five roles and the second org's owner.
   for actor in select * from (values
@@ -107,6 +118,14 @@ begin
             when 'review_events' then insert into public.review_events(organization_id,review_id,actor_id,action,rule_set_version) values (target_org,'b4000000-0000-4000-8000-000000000001',actor.id,'denied',1);
             when 'review_revisions' then insert into public.review_revisions(organization_id,review_id,author_id,content_snapshot,label) values (target_org,'b4000000-0000-4000-8000-000000000001',actor.id,'denied','denied');
             when 'review_decisions' then insert into public.review_decisions(organization_id,review_id,finding_key,finding_title,action,actor_id) values (target_org,'b4000000-0000-4000-8000-000000000001','denied','denied','resolved',actor.id);
+            when 'review_assets' then
+              asset_id := gen_random_uuid();
+              asset_review_id := case when target_org='b0000000-0000-4000-8000-000000000001'::uuid
+                then 'b4000000-0000-4000-8000-000000000001'::uuid else 'a4000000-0000-4000-8000-000000000001'::uuid end;
+              insert into public.review_assets(id,organization_id,review_id,object_path,filename,mime_type,size_bytes,width,height,uploaded_by)
+                values (asset_id,target_org,asset_review_id,
+                  target_org::text||'/'||asset_review_id::text||'/'||actor.id::text||'/'||asset_id::text||'.png',
+                  'denied.png','image/png',1,1,1,actor.id);
             when 'organization_events' then insert into public.organization_events(organization_id,actor_id,action) values (target_org,actor.id,'denied');
           end case;
         exception when insufficient_privilege then denied := true;
@@ -289,7 +308,7 @@ set local role anon;
 do $$
 declare t text;
 begin
-  foreach t in array array['organizations','organization_members','workspace_invitations','brand_rules','approved_claims','reviews','review_findings','review_comments','review_events','review_revisions','review_decisions','organization_events'] loop
+  foreach t in array array['organizations','organization_members','workspace_invitations','brand_rules','approved_claims','reviews','review_findings','review_comments','review_events','review_revisions','review_decisions','review_assets','organization_events'] loop
     if has_table_privilege('anon','public.'||t,'select') or has_table_privilege('anon','public.'||t,'insert')
       or has_table_privilege('anon','public.'||t,'update') or has_table_privilege('anon','public.'||t,'delete') then
       raise exception 'anon has table privilege on %',t;
