@@ -16,7 +16,7 @@ The region choice is for latency and primary data location, not a compliance gua
 
 ## Before a preview deployment
 
-1. Confirm project region and configure Supabase Auth confirmation, recovery, redirect URLs, and rate limits.
+1. Confirm project region and configure Supabase Auth email confirmation, recovery, redirect URLs, CAPTCHA, disabled anonymous sign-in, and rate limits. The SQL also limits organization creation to three per user per rolling 24-hour period.
 2. Review and apply `supabase/migrations/202611160001_phase1_foundation.sql` in a non-production environment.
 3. Run `supabase/tests/phase1_rls.sql` against that environment, using an available hosted test route; Docker is not required for hosted SQL execution.
 4. Complete and verify invitations, multi-organization access, and server-backed workflow history.

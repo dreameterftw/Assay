@@ -14,11 +14,12 @@ This roadmap tracks the authenticated, multi-tenant product. No Docker is requir
 
 - Supabase email/password Auth, first-organization creation, admin membership, and organization-scoped table access.
 - Roles: creator, manager, brand reviewer, legal reviewer, admin.
-- Ordered SQL migration with explicit grants, per-operation RLS, same-organization composite foreign keys, and no whole-workspace JSON snapshot.
-- Test matrix seeds two organizations and checks cross-organization read/write isolation for every role.
-- App reads/writes normalized reviews, rules, and claims. Legacy workspace JSON is no longer used.
+- Ordered SQL migration with private role helpers, explicit grants, per-operation RLS, same-organization composite foreign keys, guarded approval/risk transitions, immutable approved rules, soft deletion, database-authored audit/revisions, and no whole-workspace JSON snapshot.
+- Owner-only role promotion, membership removal, and ownership transfer are audited. Org creation has a per-user database rate limit.
+- Test matrix covers two organizations, all five roles, creator/assignee visibility, anonymous access, metadata spoofing, workflow constraints, and audit behavior.
+- App reads/writes normalized reviews, rules, and claims. Review inserts start as drafts and submission uses the guarded update path. Legacy workspace JSON is no longer used.
 
-**Outstanding:** apply migration, run the RLS matrix, implement invitation acceptance and organization switching, and verify hosted sign-up/login. No findings/decision/comment history is yet authoritative.
+**Outstanding:** apply migration, run the RLS matrix, implement invitation acceptance and organization switching, configure/verify Auth confirmation, CAPTCHA and rate limits, and verify hosted sign-up/login. Server findings/decisions and invitation delivery remain outstanding.
 
 ## Phase 2 — Brand Brain storage
 

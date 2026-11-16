@@ -20,9 +20,10 @@ No use of sessionStorage, IndexedDB, service worker, or Cache API was found in `
 ### Supabase
 
 - The project URL and publishable key are configured in ignored local `.env.local`; the key is not committed. The actual project region and Auth settings are not confirmed.
-- `supabase/migrations/202611160001_phase1_foundation.sql` defines organizations, memberships, five application roles, invitation records, core review/brand tables, RLS, explicit grants, and organization-bound composite foreign keys. It has no JSON workspace snapshot/RPC.
-- `supabase/tests/phase1_rls.sql` checks tenant isolation for all five roles across tenant tables. It is staged but has not run. No Docker is being used; hosted test execution requires Supabase CLI authentication and database access, neither provided here.
-- The app loads a user's first organization or creates one and reads/writes supported normalized records. Invitation acceptance, multi-organization switching, server-side finding decisions, and complete audit persistence remain unimplemented.
+- `supabase/migrations/202611160001_phase1_foundation.sql` defines organizations, memberships, five roles, private (non-PostgREST) authorization helpers, scoped creator visibility, review lifecycle/risk triggers, immutable approved rules, assignment constraints, soft deletion, database-authored audit/revisions, role/owner RPCs, explicit grants, and organization-bound foreign keys. It has no workspace snapshot, views, or storage bucket policies.
+- `supabase/tests/phase1_rls.sql` checks cross-organization access for all five roles plus the second owner, same-org creator/assignee visibility, rule visibility, workflow/approval guards, version/audit behavior, fake JWT metadata, anon grants, and owner membership actions. It is staged but has not run. No Docker is being used; hosted test execution requires Supabase CLI authentication and database access, which are not available in this session.
+- The app loads a user's first organization or creates one and reads/writes supported normalized records. Review submission inserts a draft then submits through the guarded update path. Invitation acceptance, multi-organization switching, server-side findings/decisions, and complete audit persistence remain unimplemented.
+- Auth confirmation, anonymous sign-in, CAPTCHA, and Auth rate limits are project dashboard settings and have not been verified. The migration limits organization creation to three per user per rolling day. Account deletion remains restricted while authored content or memberships exist; anonymization is a later task.
 
 ### Vercel
 

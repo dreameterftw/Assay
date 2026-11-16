@@ -4,9 +4,12 @@
 
 - Local Auth and normalized persistence are implemented against the supplied project configuration, but hosted Auth, schema, RLS, and data writes remain unverified.
 - The former `assay-workspace-v1` content mirror is no longer read or written; the legacy key is removed at app startup and sign-out. Supabase Auth still persists its browser session as expected.
-- Phase 1 migrations explicitly enable RLS and grant only required table operations. Tenant-owned child rows use composite organization/parent foreign keys. Review events and revisions are append-only for authenticated clients.
-- RLS tests cover cross-organization reads and writes for all five application roles. Tests are not run here because the hosted database needs to be exercised separately and Docker is not used.
+- Phase 1 migration explicitly enables RLS and grants only required table operations. Creators see only their own or assigned reviews and child data; approved active rules are visible to creators. Tenant-owned child rows use composite organization/parent foreign keys.
+- Review events/revisions are written by database triggers, immutable to authenticated clients, and protected from review deletion. Approved rules are immutable and stamped with approver/time. Review approval blocks self-approval, enforces legal approval for high risk, and prevents creator-controlled routing/risk changes.
+- RLS tests cover both tenant isolation and these role/workflow cases. Tests are staged but not run against hosted Postgres; Docker is not used.
+- Owner-only role-promotion/removal/ownership-transfer functions record organization events. Auth user deletion is restricted while referenced content/membership exists; there is no automated anonymization flow yet.
 - Image uploads are unavailable until private Storage and signed URLs exist. Findings and workflow UI records are not yet authoritative server history.
+- Supabase Auth email confirmation, anonymous sign-in, CAPTCHA, and provider rate limits are dashboard configuration and remain unverified. The database limits organization creation to three per owner per rolling 24 hours.
 - AI processing is disabled. Do not treat this build as ready for confidential customer content.
 
 ## Required before a pilot
