@@ -1,0 +1,23 @@
+{
+  "version": "1.0",
+  "description": "Small labeled checks for the Assay deterministic rule engine. Synthetic examples only.",
+  "today": "2026-11-13",
+  "rules": [
+    { "id": "B-01", "category": "Terminology", "label": "Prefer everyday care", "description": "Avoid daily essentials.", "source": "Fixture guide · Language", "status": "Approved", "severity": "Low", "active": true },
+    { "id": "B-02", "category": "Terminology", "label": "Avoid miracle", "description": "Do not promise guaranteed outcomes.", "source": "Fixture guide · Claims", "status": "Approved", "severity": "High", "active": true },
+    { "id": "B-03", "category": "Required language", "label": "Sponsored disclosure", "description": "Sponsored posts need #ad.", "source": "Fixture policy · Disclosure", "status": "Approved", "severity": "High", "active": true },
+    { "id": "B-04", "category": "Claims", "label": "Substantiate superlatives", "description": "Support comparative claims.", "source": "Fixture policy · Claims", "status": "Approved", "severity": "High", "active": true },
+    { "id": "B-05", "category": "Tone", "label": "Warm and direct", "description": "Avoid pressure and absolute promises.", "source": "Fixture guide · Voice", "status": "Approved", "severity": "Medium", "active": true }
+  ],
+  "claims": [
+    { "id": "C-1", "statement": "8,200 customers", "evidence": "Synthetic Q3 evidence", "owner": "Analytics", "reviewDate": "2026-09-12", "expiryDate": "2026-12-12", "active": true },
+    { "id": "C-2", "statement": "50% faster to ship", "evidence": "Synthetic expired evidence", "owner": "Operations", "reviewDate": "2025-10-01", "expiryDate": "2026-01-01", "active": true }
+  ],
+  "cases": [
+    { "id": "term-flag", "content": "Explore our daily essentials.", "expected": ["TERMINOLOGY"] },
+    { "id": "sponsored-flag", "content": "Sponsored partnership with our team.", "expected": ["DISCLOSURE"] },
+    { "id": "superlative-flag", "content": "We are the #1 choice.", "expected": ["CLAIM"] },
+    { "id": "expired-claim-flag", "content": "Our service is 50% faster to ship.", "expected": ["CLAIM"] },
+    { "id": "clean-control", "content": "Find the everyday care that fits your routine.", "expected": [] }
+  ]
+}
