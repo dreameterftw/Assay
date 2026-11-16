@@ -230,6 +230,24 @@ create table public.review_events (
   foreign key (organization_id, review_id) references public.reviews(organization_id, id) on delete restrict
 );
 
+create table public.review_decisions (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null,
+  review_id uuid not null,
+  finding_key text not null,
+  finding_title text not null,
+  action text not null check (action in ('resolved','dismissed','confirmed')),
+  reason text not null default '',
+  actor_id uuid not null references auth.users(id) on delete restrict,
+  created_at timestamptz not null default now(),
+  check (octet_length(finding_key) between 1 and 2000),
+  check (octet_length(finding_title) <= 500),
+  check (octet_length(reason) <= 10000),
+  check (action <> 'dismissed' or length(btrim(reason)) >= 3),
+  unique (organization_id, id),
+  foreign key (organization_id, review_id) references public.reviews(organization_id, id) on delete restrict
+);
+
 create table public.review_revisions (
   id uuid primary key default gen_random_uuid(),
   organization_id uuid not null,
@@ -256,6 +274,23 @@ create table public.organization_events (
   check (octet_length(detail::text) <= 50000),
   unique (organization_id, id)
 );
+
+create function private.assay_record_finding_decision()
+returns trigger language plpgsql security definer set search_path = '' as $$
+declare review_version integer;
+begin
+  select r.rule_set_version into review_version from public.reviews r
+    where r.organization_id = new.organization_id and r.id = new.review_id;
+  insert into public.review_events(organization_id,review_id,actor_id,action,detail,rule_set_version)
+  values (new.organization_id,new.review_id,new.actor_id,'finding_decision',
+    jsonb_build_object('finding_key',new.finding_key,'finding_title',new.finding_title,
+      'decision',new.action,'reason',new.reason),coalesce(review_version,1));
+  return new;
+end;
+$$;
+revoke all on function private.assay_record_finding_decision() from public, anon, authenticated;
+create trigger review_decisions_record_event after insert on public.review_decisions
+  for each row execute function private.assay_record_finding_decision();
 
 create function private.assay_touch_updated_at()
 returns trigger language plpgsql set search_path = '' as $$
@@ -397,6 +432,15 @@ begin
     raise exception 'Only admins may archive a review' using errcode = '42501';
   end if;
 
+  if new.status is distinct from old.status and not (
+    (old.status = 'draft' and new.status = 'submitted')
+    or (old.status = 'submitted' and new.status in ('in_review','changes_requested','approved','waived'))
+    or (old.status = 'in_review' and new.status in ('changes_requested','approved','waived'))
+    or (old.status = 'changes_requested' and new.status in ('submitted','in_review'))
+  ) then
+    raise exception 'Invalid review status transition' using errcode = '42501';
+  end if;
+
   can_review := private.assay_has_role(new.organization_id,
     array['admin','manager','brand_reviewer','legal_reviewer']::public.assay_role[]);
   if not can_review then
@@ -525,9 +569,13 @@ begin
   values (new.organization_id,new.id,coalesce((select auth.uid()),new.created_by),event_action,
     jsonb_build_object('status',new.status,'risk_tier',new.risk_tier,'assigned_reviewer',new.assigned_reviewer,
       'rule_snapshot',new.rule_snapshot),new.rule_set_version);
-  if tg_op = 'UPDATE' and new.content is distinct from old.content then
+  if tg_op = 'UPDATE' and (
+    new.content is distinct from old.content
+    or (new.status is distinct from old.status and new.status = 'changes_requested')
+  ) then
     insert into public.review_revisions(organization_id,review_id,author_id,content_snapshot,label)
-    values (old.organization_id,old.id,coalesce((select auth.uid()),old.created_by),old.content,'Before content update');
+    values (old.organization_id,old.id,coalesce((select auth.uid()),old.created_by),old.content,
+      case when new.content is distinct from old.content then 'Before content update' else 'Before changes requested' end);
   end if;
   return new;
 end;
@@ -546,6 +594,7 @@ alter table public.review_findings enable row level security;
 alter table public.review_comments enable row level security;
 alter table public.review_events enable row level security;
 alter table public.review_revisions enable row level security;
+alter table public.review_decisions enable row level security;
 alter table public.organization_events enable row level security;
 
 create policy organizations_select_member on public.organizations for select to authenticated
@@ -630,12 +679,21 @@ create policy events_select_member on public.review_events for select to authent
 create policy revisions_select_member on public.review_revisions for select to authenticated
   using (exists (select 1 from public.reviews r
     where r.organization_id = review_revisions.organization_id and r.id = review_revisions.review_id));
+create policy decisions_select_member on public.review_decisions for select to authenticated
+  using (exists (select 1 from public.reviews r
+    where r.organization_id = review_decisions.organization_id and r.id = review_decisions.review_id));
+create policy decisions_insert_actor on public.review_decisions for insert to authenticated
+  with check (actor_id = (select auth.uid()) and exists (select 1 from public.reviews r
+    where r.organization_id = review_decisions.organization_id and r.id = review_decisions.review_id
+      and r.status not in ('approved','waived') and r.archived_at is null
+      and (r.created_by = (select auth.uid()) or private.assay_has_role(r.organization_id,
+        array['admin','manager','brand_reviewer','legal_reviewer']::public.assay_role[]))));
 create policy organization_events_select_admin on public.organization_events for select to authenticated
   using (private.assay_has_role(organization_id, array['admin']::public.assay_role[]));
 
 revoke all on public.organizations, public.organization_members, public.workspace_invitations,
   public.brand_rules, public.approved_claims, public.reviews, public.review_findings,
-  public.review_comments, public.review_events, public.review_revisions, public.organization_events from public, anon, authenticated;
+  public.review_comments, public.review_events, public.review_revisions, public.review_decisions, public.organization_events from public, anon, authenticated;
 grant select, insert on public.organizations to authenticated;
 grant update (name) on public.organizations to authenticated;
 grant select, delete on public.organization_members to authenticated;
@@ -643,7 +701,8 @@ grant update (role) on public.organization_members to authenticated;
 grant select, insert, delete on public.workspace_invitations to authenticated;
 grant select, insert, update on public.brand_rules, public.approved_claims to authenticated;
 grant select, insert, update on public.reviews to authenticated;
-grant select on public.review_findings, public.review_events, public.review_revisions to authenticated;
+grant select on public.review_findings, public.review_events, public.review_revisions, public.review_decisions to authenticated;
+grant insert on public.review_decisions to authenticated;
 grant select, insert on public.review_comments to authenticated;
 grant select on public.organization_events to authenticated;
 

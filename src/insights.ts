@@ -1,7 +1,7 @@
 import type { Review } from './types'
 
 export function buildRadar(reviews: Review[]) {
-  const findings = reviews.flatMap((review) => (review.findings ?? []).filter((finding) => finding.level !== 'Clear').map((finding) => ({ review, finding })))
+  const findings = reviews.flatMap((review) => (review.findings ?? []).filter((finding) => finding.level !== 'Clear' && !finding.decision).map((finding) => ({ review, finding })))
   const counts = new Map<string, { title: string; type: string; count: number; reviewIds: string[] }>()
   for (const { review, finding } of findings) {
     const key = finding.sourceId || finding.title
@@ -13,7 +13,7 @@ export function buildRadar(reviews: Review[]) {
   const repeated = [...counts.values()].sort((a, b) => b.count - a.count)
   const statuses = reviews.reduce<Record<string, number>>((all, review) => ({ ...all, [review.status]: (all[review.status] ?? 0) + 1 }), {})
   const openFindings = findings.length
-  const resolvedActions = reviews.reduce((total, review) => total + (review.events ?? []).filter((item) => /resolved|dismissed|confirmed/i.test(item.action)).length, 0)
+  const resolvedActions = reviews.reduce((total, review) => total + (review.decisions ?? []).length, 0)
   const changesRequested = reviews.reduce((total, review) => total + (review.events ?? []).filter((item) => /changes requested/i.test(item.action)).length, 0)
   const ambiguous = repeated.filter((item) => item.count >= 2)
   return { repeated, statuses, openFindings, resolvedActions, changesRequested, ambiguous, reviewCount: reviews.length }

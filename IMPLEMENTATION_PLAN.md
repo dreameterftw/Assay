@@ -19,7 +19,9 @@ This roadmap tracks the authenticated, multi-tenant product. No Docker is requir
 - Test matrix covers two organizations, all five roles, creator/assignee visibility, anonymous access, metadata spoofing, workflow constraints, and audit behavior.
 - App reads/writes normalized reviews, rules, and claims. Review inserts start as drafts and submission uses the guarded update path. Legacy workspace JSON is no longer used.
 
-**Outstanding:** apply migration, run the RLS matrix, implement invitation acceptance and organization switching, configure/verify Auth confirmation, CAPTCHA and rate limits, and verify hosted sign-up/login. Server findings/decisions and invitation delivery remain outstanding.
+**Implemented in the client:** organization switching, organization-scoped reads/writes, comments, deterministic finding decisions with dismissal reasons, reviewer assignment, status changes, and database-backed event/revision reads.
+
+**Outstanding:** apply migration, run the RLS matrix, implement verified invitation acceptance and delivery, configure/verify Auth confirmation, CAPTCHA and rate limits, and verify hosted sign-up/login. Findings are currently computed in the browser; AI, image analysis beyond local metadata checks, and server-validated findings remain outstanding.
 
 ## Phase 2 — Brand Brain storage
 
@@ -66,5 +68,6 @@ This roadmap tracks the authenticated, multi-tenant product. No Docker is requir
 ## Current verification and limits
 
 - `npm run build` passes.
-- The migration and RLS tests have not been run against hosted Postgres. Supabase CLI access requires a personal access token; no token or database password was supplied. They are not requested or embedded in this repository.
-- No deployment is live. Do not represent the current UI's local deterministic checks, collaboration controls, passport, or Radar as authoritative server workflows.
+- The migration and RLS tests have not been run against hosted Postgres. The Supabase CLI has no access token, and local database validation is unavailable without Docker/Podman.
+- No Vercel project or deployment is configured. Vercel CLI requests currently fail to reach the Vercel API.
+- Deterministic findings and Radar are local computations. Do not describe them as server-validated or AI-backed.

@@ -2,6 +2,10 @@ import type { ApprovedClaim, BrandRule, Finding } from './types'
 
 const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
+export function findingKey(finding: Pick<Finding, 'sourceId' | 'type' | 'title' | 'excerpt'>): string {
+  return JSON.stringify([finding.sourceId ?? finding.type, finding.title, finding.excerpt])
+}
+
 function addFinding(findings: Finding[], input: Omit<Finding, 'id'>) {
   if (findings.some((finding) => finding.title === input.title && finding.excerpt === input.excerpt)) return
   findings.push({ ...input, id: `det-${findings.length + 1}-${Math.random().toString(36).slice(2, 7)}` })

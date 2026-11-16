@@ -61,7 +61,7 @@ do $$
 declare actor record; table_name text; visible_count bigint; changed_count bigint; denied boolean;
   target_org uuid;
   table_names text[] := array['organizations','organization_members','workspace_invitations','brand_rules',
-    'approved_claims','reviews','review_findings','review_comments','review_events','review_revisions','organization_events'];
+    'approved_claims','reviews','review_findings','review_comments','review_events','review_revisions','review_decisions','organization_events'];
 begin
   -- Cross-organization reads/writes for all five roles and the second org's owner.
   for actor in select * from (values
@@ -106,6 +106,7 @@ begin
             when 'review_comments' then insert into public.review_comments(organization_id,review_id,author_id,body) values (target_org,'b4000000-0000-4000-8000-000000000001',actor.id,'denied');
             when 'review_events' then insert into public.review_events(organization_id,review_id,actor_id,action,rule_set_version) values (target_org,'b4000000-0000-4000-8000-000000000001',actor.id,'denied',1);
             when 'review_revisions' then insert into public.review_revisions(organization_id,review_id,author_id,content_snapshot,label) values (target_org,'b4000000-0000-4000-8000-000000000001',actor.id,'denied','denied');
+            when 'review_decisions' then insert into public.review_decisions(organization_id,review_id,finding_key,finding_title,action,actor_id) values (target_org,'b4000000-0000-4000-8000-000000000001','denied','denied','resolved',actor.id);
             when 'organization_events' then insert into public.organization_events(organization_id,actor_id,action) values (target_org,actor.id,'denied');
           end case;
         exception when insufficient_privilege then denied := true;
@@ -179,10 +180,29 @@ begin
   update public.reviews set status='submitted' where id='a4000000-0000-4000-8000-000000000003';
   if (select jsonb_array_length(rule_snapshot) from public.reviews where id='a4000000-0000-4000-8000-000000000003') <> 1 then raise exception 'Submission did not snapshot approved rule ID/version'; end if;
   denied := false;
+  begin update public.reviews set status='approved' where id='a4000000-0000-4000-8000-000000000003';
+  exception when insufficient_privilege then denied := true; end;
+  if not denied then raise exception 'Creator self-approved a submitted review'; end if;
+  denied := false;
   begin insert into public.review_findings(organization_id,review_id,source_kind,category,severity,state,title,explanation)
     values ('a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000003','image_check','visual','low','likely','fake','fake');
   exception when insufficient_privilege then denied := true; end;
   if not denied then raise exception 'Client inserted a finding'; end if;
+  insert into public.review_decisions(organization_id,review_id,finding_key,finding_title,action,actor_id)
+    values ('a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000003','test-key','Test finding','resolved','10000000-0000-4000-8000-000000000002');
+  denied := false;
+  begin insert into public.review_decisions(organization_id,review_id,finding_key,finding_title,action,actor_id)
+    values ('a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000003','dismiss-key','Dismissed finding','dismissed','10000000-0000-4000-8000-000000000002');
+  exception when check_violation then denied := true; end;
+  if not denied then raise exception 'Dismissal without a reason succeeded'; end if;
+  denied := false;
+  begin update public.review_decisions set reason='tampered' where review_id='a4000000-0000-4000-8000-000000000003';
+  exception when insufficient_privilege then denied := true; end;
+  if not denied then raise exception 'Review decisions were mutable'; end if;
+  denied := false;
+  begin delete from public.review_decisions where review_id='a4000000-0000-4000-8000-000000000003';
+  exception when insufficient_privilege then denied := true; end;
+  if not denied then raise exception 'Review decisions were deletable'; end if;
   denied := false;
   begin insert into public.review_events(organization_id,review_id,actor_id,action,rule_set_version)
     values ('a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000002','fake',1);
@@ -194,6 +214,7 @@ begin
   perform set_config('request.jwt.claims','{"sub":"10000000-0000-4000-8000-000000000003","role":"authenticated"}',true);
   insert into public.reviews(id,organization_id,title,content,created_by)
   values ('a4000000-0000-4000-8000-000000000004','a0000000-0000-4000-8000-000000000001','Manager own','Own copy','10000000-0000-4000-8000-000000000003');
+  update public.reviews set status='submitted' where id='a4000000-0000-4000-8000-000000000004';
   denied := false;
   begin update public.reviews set status='approved' where id='a4000000-0000-4000-8000-000000000004';
   exception when insufficient_privilege then denied := true; end;
@@ -268,7 +289,7 @@ set local role anon;
 do $$
 declare t text;
 begin
-  foreach t in array array['organizations','organization_members','workspace_invitations','brand_rules','approved_claims','reviews','review_findings','review_comments','review_events','review_revisions','organization_events'] loop
+  foreach t in array array['organizations','organization_members','workspace_invitations','brand_rules','approved_claims','reviews','review_findings','review_comments','review_events','review_revisions','review_decisions','organization_events'] loop
     if has_table_privilege('anon','public.'||t,'select') or has_table_privilege('anon','public.'||t,'insert')
       or has_table_privilege('anon','public.'||t,'update') or has_table_privilege('anon','public.'||t,'delete') then
       raise exception 'anon has table privilege on %',t;
