@@ -1,19 +1,27 @@
 # Deployment without Docker
 
-## Static demo deployment
+## Current state
 
-The current app is a static Vite build. It can be deployed to Vercel without Docker:
+The Supabase URL and browser-safe publishable key are configured in ignored local `.env.local`. No migration has been applied or tested against the hosted project. No Vercel project, deployment, or environment configuration exists. The Vercel CLI is logged into a default Hobby scope with no projects; confirm it is the right account before linking.
 
-1. Push this repository to a Git provider.
-2. Import it into Vercel and select the Vite framework preset.
-3. Use `npm run build` as the build command and `dist` as the output directory.
-4. Do not configure AI or database secrets for this static demo.
-5. Review the security headers in `vercel.json` after deployment and smoke-check the main pages.
+## Target architecture
 
-This publishes a demo, not a secure multi-tenant production service. The browser stores content locally, and each visitor has a separate browser-local workspace.
+- Frontend: Vite static build on Vercel (`npm run build`, output `dist`).
+- Auth/database: Supabase Auth and Postgres with RLS. The requested target is Mumbai (`ap-south-1`), but the existing project's region still needs verification.
+- Vercel functions, when added: Mumbai (`bom1`) near the database.
+- AI: later server-side integration only, disabled until redaction, organization opt-in, disclosure, and citation validation are implemented.
+- Docker: not used.
 
-## Hosted team product path
+The region choice is for latency and primary data location, not a compliance guarantee. See [PHASE0_AUDIT.md](./PHASE0_AUDIT.md).
 
-The schema in `supabase/schema.sql` is a proposed hosted database/RLS foundation. It is not yet connected to the frontend or validated against a live Supabase project. Before a team pilot, apply and test it in a non-production project, then add a server-side application layer for authenticated reads/writes, membership checks, uploads, signed URLs, provider calls, rate limits, and data retention. Use a hosted deployment platform for that server layer; Docker is not required.
+## Before a preview deployment
 
-Keep AI disabled until an authenticated endpoint enforces workspace authorization and discloses the exact fields sent to the configured provider. A Vercel static frontend alone cannot safely hold provider credentials.
+1. Confirm project region and configure Supabase Auth confirmation, recovery, redirect URLs, and rate limits.
+2. Review and apply `supabase/migrations/202611160001_phase1_foundation.sql` in a non-production environment.
+3. Run `supabase/tests/phase1_rls.sql` against that environment, using an available hosted test route; Docker is not required for hosted SQL execution.
+4. Complete and verify invitations, multi-organization access, and server-backed workflow history.
+5. Add private object storage, signed URLs, upload limits/scanning, and retention controls before enabling uploads.
+6. Confirm the Vercel account/scope, link this repository, and set only `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` for browser code. Keep service-role and AI secrets server-side.
+7. Exercise fresh sign-up and a multi-account review cycle in Preview before promoting anything to Production.
+
+The current build is not ready for an organization/agency pilot. Keep AI and unsupported features unavailable.
