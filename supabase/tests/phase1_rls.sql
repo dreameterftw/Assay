@@ -88,7 +88,7 @@ values
  ('a1000000-0000-4000-8000-000000000003','a0000000-0000-4000-8000-000000000001','accepted-again@test.invalid','creator',
    encode(sha256(convert_to('accepted-again-token-abcdefghijklmnopqrstuvwxyz','utf8')),'hex'),'10000000-0000-4000-8000-000000000001',now()+interval '1 day',now()-interval '1 hour','10000000-0000-4000-8000-000000000007'),
  ('a1000000-0000-4000-8000-000000000004','a0000000-0000-4000-8000-000000000001','expired-again@test.invalid','creator',
-   encode(sha256(convert_to('expired-again-token-abcdefghijklmnopqrstuvwxyz','utf8')),'hex'),'10000000-0000-4000-8000-000000000001',now()-interval '1 day');
+   encode(sha256(convert_to('expired-again-token-abcdefghijklmnopqrstuvwxyz','utf8')),'hex'),'10000000-0000-4000-8000-000000000001',now()-interval '1 day',null,null);
 insert into public.brand_rules(id,organization_id,rule_key,version,category,title,description,severity,status,active,created_by)
 values
  ('a2000000-0000-4000-8000-000000000001','a0000000-0000-4000-8000-000000000001','approved-a',1,'tone','Approved A','Visible approved rule','low','approved',true,'10000000-0000-4000-8000-000000000001'),
@@ -566,6 +566,8 @@ begin
   if not found then raise exception 'Postgres could not delete a finding'; end if;
 end;
 $$;
+delete from private.review_run_rate_limits
+  where review_id='a4000000-0000-4000-8000-000000000003';
 set local role service_role;
 select set_config('request.jwt.claim.sub','10000000-0000-4000-8000-000000000001',true);
 select set_config('request.jwt.claims','{"sub":"10000000-0000-4000-8000-000000000001","role":"service_role"}',true);
@@ -574,6 +576,7 @@ declare inputs jsonb; run_result jsonb; run_input record;
 begin
   for run_input in
     select * from (values
+      ('a4000000-0000-4000-8000-000000000003'::uuid,'10000000-0000-4000-8000-000000000002'::uuid),
       ('a4000000-0000-4000-8000-000000000004'::uuid,'10000000-0000-4000-8000-000000000003'::uuid),
       ('a4000000-0000-4000-8000-000000000008'::uuid,'10000000-0000-4000-8000-000000000002'::uuid),
       ('a4000000-0000-4000-8000-000000000009'::uuid,'10000000-0000-4000-8000-000000000002'::uuid),
@@ -706,6 +709,10 @@ begin
   insert into public.review_decisions(organization_id,review_id,finding_key,finding_title,action,reason,actor_id)
     values ('a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000006','seed-high-finding','High finding','dismissed','Manager reviewed the evidence','10000000-0000-4000-8000-000000000003');
 
+  perform set_config('request.jwt.claim.sub','10000000-0000-4000-8000-000000000002',true);
+  perform set_config('request.jwt.claims','{"sub":"10000000-0000-4000-8000-000000000002","role":"authenticated"}',true);
+  update public.reviews set content='Edited after the fixture run'
+    where id='a4000000-0000-4000-8000-000000000008';
   denied := false;
   begin update public.reviews set status='submitted' where id='a4000000-0000-4000-8000-000000000008';
   exception when insufficient_privilege then denied := true; end;
