@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-rls:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+        env:
+          VITE_SUPABASE_URL: http://127.0.0.1:54321
+      - run: npm run test:checks
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.114.0
+      - name: Initialize local Supabase config
+        run: supabase init
+      - name: Start local Supabase
+        run: supabase start
+      - name: Apply migrations
+        run: supabase db reset --local
+      - name: Run RLS integration tests
+        run: supabase test db --local supabase/tests/phase1_rls.sql

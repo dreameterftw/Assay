@@ -15,6 +15,7 @@ export type Finding = {
 
 export type Review = {
   id: string
+  createdAt?: string
   title: string
   channel: string
   owner: string
@@ -33,12 +34,28 @@ export type Review = {
   revisions?: ReviewRevision[]
   decisions?: ReviewDecision[]
   passportCreatedAt?: string
+  approvedRunId?: string
+  approvedRun?: {
+    id: string
+    contentSha256: string
+    rulesSha256: string
+    claimsSha256: string
+    assetSnapshot: unknown
+    ruleSnapshot: unknown
+    claimSnapshot: unknown
+    validUntil: string
+  }
   ruleSetVersion?: number
   ruleSnapshot?: { rule_id: string; rule_key: string; version: number }[]
+  latestRunContentSha256?: string
+  latestRunIsCurrent?: boolean
+  latestRunValidUntil?: string
+  waiverReason?: string
+  waiverExpiresAt?: string
   image?: { name: string; dataUrl: string; width: number; height: number; altText: string; palette: string[]; assetId?: string; storagePath?: string }
 }
 
-export type ReviewComment = { id: string; author: string; role: ReviewerRole; text: string; createdAt: string; anchor?: string }
+export type ReviewComment = { id: string; author: string; role: ReviewerRole; text: string; createdAt: string; anchor?: string; visibility?: 'internal' | 'shared' }
 export type ReviewEvent = { id: string; actor: string; role: ReviewerRole; action: string; detail: string; createdAt: string }
 export type ReviewRevision = { id: string; content: string; findings: Finding[]; createdAt: string; author: string; label: string }
 export type ReviewDecision = { id: string; findingKey: string; findingTitle: string; action: 'resolved' | 'dismissed' | 'confirmed'; reason: string; author: string; createdAt: string }
@@ -46,11 +63,13 @@ export type ReviewerRole = 'Creator' | 'Manager' | 'Brand reviewer' | 'Legal rev
 
 export type BrandRule = {
   id: string
-  category: 'Terminology' | 'Required language' | 'Claims' | 'Tone'
+  ruleKey?: string
+  category: 'Terminology' | 'Required language' | 'Claims' | 'Tone' | 'Visual' | 'Accessibility'
+  version?: number
   label: string
   description: string
   source: string
-  status: 'Approved' | 'Draft'
+  status: 'Approved' | 'Draft' | 'Retired'
   severity: 'High' | 'Medium' | 'Low'
   active: boolean
   matchText?: string
@@ -58,6 +77,7 @@ export type BrandRule = {
 
 export type ApprovedClaim = {
   id: string
+  version?: number
   statement: string
   evidence: string
   evidenceUrl?: string

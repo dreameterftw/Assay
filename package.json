@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && tsc -p api/tsconfig.json && vite build",
+    "test:checks": "node --experimental-strip-types --test tests/checks-core.test.mjs",
     "preview": "vite preview",
     "benchmark": "node scripts/run-benchmark.mjs"
   },
@@ -13,12 +14,14 @@
     "@supabase/supabase-js": "^2.119.0",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "sharp": "^0.35.5"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
+    "@vercel/node": "^31.0.0",
     "@vitejs/plugin-react": "^6.3.0",
     "typescript": "~5.6.2",
     "vite": "^8.3.8"
