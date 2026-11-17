@@ -1,6 +1,5 @@
 -- Assay Phase 1 foundation. Apply only after review in a non-production project.
 -- Every tenant-owned row has an organization_id RLS boundary. No client snapshot RPC.
-create extension if not exists pgcrypto;
 
 create type public.assay_role as enum (
   'creator', 'manager', 'brand_reviewer', 'legal_reviewer', 'admin'
@@ -161,6 +160,7 @@ create table public.reviews (
   risk_tier text not null default 'standard' check (risk_tier in ('low','standard','high')),
   assigned_reviewer uuid,
   rule_set_version integer not null default 1,
+  approved_content_sha256 text,
   rule_snapshot jsonb not null default '[]'::jsonb check (jsonb_typeof(rule_snapshot) = 'array'),
   archived_at timestamptz,
   created_by uuid not null references auth.users(id) on delete restrict,
@@ -178,6 +178,7 @@ create table public.review_findings (
   id uuid primary key default gen_random_uuid(),
   organization_id uuid not null,
   review_id uuid not null,
+  finding_key text not null check (octet_length(finding_key) between 1 and 2000),
   source_kind text not null check (source_kind in ('rule','claim','image_check','ai_judgment')),
   rule_id uuid,
   claim_id uuid,
@@ -190,6 +191,7 @@ create table public.review_findings (
   confidence numeric check (confidence between 0 and 1),
   created_at timestamptz not null default now(),
   unique (organization_id, id),
+  unique (organization_id, review_id, finding_key),
   check (octet_length(explanation) <= 50000),
   check (octet_length(title) <= 500),
   check (octet_length(excerpt) <= 20000),
@@ -244,6 +246,21 @@ create table public.review_decisions (
   check (octet_length(finding_title) <= 500),
   check (octet_length(reason) <= 10000),
   check (action <> 'dismissed' or length(btrim(reason)) >= 3),
+  unique (organization_id, id),
+  foreign key (organization_id, review_id) references public.reviews(organization_id, id) on delete restrict
+);
+
+create table public.review_runs (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null,
+  review_id uuid not null,
+  requested_by uuid not null references auth.users(id) on delete restrict,
+  content_sha256 text not null check (content_sha256 ~ '^[0-9a-f]{64}$'),
+  rule_snapshot jsonb not null check (jsonb_typeof(rule_snapshot) = 'array'),
+  claim_snapshot jsonb not null default '[]'::jsonb check (jsonb_typeof(claim_snapshot) = 'array'),
+  finding_count integer not null check (finding_count >= 0),
+  engine_version text not null,
+  created_at timestamptz not null default now(),
   unique (organization_id, id),
   foreign key (organization_id, review_id) references public.reviews(organization_id, id) on delete restrict
 );
@@ -339,7 +356,6 @@ create trigger review_assets_record_event after insert or update or delete on pu
 insert into storage.buckets(id,name,public,file_size_limit,allowed_mime_types)
 values ('assay-review-assets','assay-review-assets',false,5242880,array['image/png','image/jpeg','image/webp'])
 on conflict (id) do update set public=false,file_size_limit=excluded.file_size_limit,allowed_mime_types=excluded.allowed_mime_types;
-alter table storage.objects enable row level security;
 
 create function private.assay_touch_updated_at()
 returns trigger language plpgsql set search_path = '' as $$
@@ -459,6 +475,14 @@ begin
     return new;
   end if;
 
+  if tg_op = 'UPDATE' and new.assigned_reviewer is null and old.assigned_reviewer is not null
+    and not exists (select 1 from public.organization_members m
+      where m.organization_id = old.organization_id and m.user_id = old.assigned_reviewer)
+    and (to_jsonb(new) - 'assigned_reviewer' - 'updated_at') = (to_jsonb(old) - 'assigned_reviewer' - 'updated_at') then
+    new.updated_at := now();
+    return new;
+  end if;
+
   if tg_op = 'INSERT' then
     if new.created_by <> (select auth.uid()) or new.status <> 'draft'
       or new.risk_tier <> 'standard' or new.assigned_reviewer is not null
@@ -518,6 +542,13 @@ begin
   end if;
 
   if new.status in ('approved','waived') and new.status is distinct from old.status then
+    if new.content is distinct from old.content or new.title is distinct from old.title or new.channel is distinct from old.channel then
+      raise exception 'Content cannot change in the same step as approval' using errcode = '42501';
+    end if;
+    new.approved_content_sha256 := encode(sha256(convert_to(new.content, 'utf8')), 'hex');
+  end if;
+
+  if new.status in ('approved','waived') and new.status is distinct from old.status then
     if new.created_by = (select auth.uid()) then
       raise exception 'Self-approval is not allowed' using errcode = '42501';
     end if;
@@ -531,6 +562,10 @@ begin
     raise exception 'Rule snapshots are database-managed' using errcode = '42501';
   end if;
   if new.status = 'submitted' and old.status in ('draft','changes_requested') then
+    if not exists (select 1 from public.review_runs rr where rr.organization_id=new.organization_id and rr.review_id=new.id
+      and rr.content_sha256=encode(sha256(convert_to(new.content,'utf8')),'hex')) then
+      raise exception 'Run the review on the current content before submitting' using errcode = '42501';
+    end if;
     select coalesce(jsonb_agg(jsonb_build_object('rule_id',r.id,'rule_key',r.rule_key,'version',r.version)
       order by r.rule_key, r.version), '[]'::jsonb)
       into new.rule_snapshot
@@ -567,7 +602,7 @@ begin
     new.rule_key is distinct from old.rule_key or new.version is distinct from old.version
     or new.category is distinct from old.category or new.title is distinct from old.title
     or new.description is distinct from old.description or new.source_label is distinct from old.source_label
-    or new.severity is distinct from old.severity
+    or new.severity is distinct from old.severity or new.match_text is distinct from old.match_text
   ) then
     raise exception 'Approved rules are immutable; create a new version' using errcode = '42501';
   end if;
@@ -644,6 +679,7 @@ alter table public.review_comments enable row level security;
 alter table public.review_events enable row level security;
 alter table public.review_revisions enable row level security;
 alter table public.review_decisions enable row level security;
+alter table public.review_runs enable row level security;
 alter table public.review_assets enable row level security;
 alter table public.organization_events enable row level security;
 
@@ -670,8 +706,9 @@ create policy members_delete_owner on public.organization_members for delete to 
 create policy invitations_select_admin_manager on public.workspace_invitations for select to authenticated
   using (private.assay_has_role(organization_id, array['admin','manager']::public.assay_role[]));
 create policy invitations_insert_admin_manager on public.workspace_invitations for insert to authenticated
-  with check (invited_by = (select auth.uid())
-    and private.assay_has_role(organization_id, array['admin','manager']::public.assay_role[]));
+  with check (invited_by = (select auth.uid()) and (
+    private.assay_has_role(organization_id, array['admin']::public.assay_role[])
+    or (private.assay_has_role(organization_id, array['manager']::public.assay_role[]) and role = 'creator')));
 create policy invitations_delete_admin_manager on public.workspace_invitations for delete to authenticated
   using (private.assay_has_role(organization_id, array['admin','manager']::public.assay_role[]));
 -- Invitation acceptance is deliberately not exposed as direct table writes; add a verified server flow later.
@@ -716,6 +753,8 @@ create policy reviews_update_creator_manager_reviewer on public.reviews for upda
 create policy findings_select_member on public.review_findings for select to authenticated
   using (exists (select 1 from public.reviews r
     where r.organization_id = review_findings.organization_id and r.id = review_findings.review_id));
+create policy runs_select_member on public.review_runs for select to authenticated
+  using (exists (select 1 from public.reviews r where r.organization_id=review_runs.organization_id and r.id=review_runs.review_id));
 create policy comments_select_member on public.review_comments for select to authenticated
   using (exists (select 1 from public.reviews r
     where r.organization_id = review_comments.organization_id and r.id = review_comments.review_id));
@@ -737,7 +776,14 @@ create policy decisions_insert_actor on public.review_decisions for insert to au
     where r.organization_id = review_decisions.organization_id and r.id = review_decisions.review_id
       and r.status not in ('approved','waived') and r.archived_at is null
       and (r.created_by = (select auth.uid()) or private.assay_has_role(r.organization_id,
-        array['admin','manager','brand_reviewer','legal_reviewer']::public.assay_role[]))));
+        array['admin','manager','brand_reviewer','legal_reviewer']::public.assay_role[]))
+      and (private.assay_has_role(r.organization_id,
+        array['admin','manager','brand_reviewer','legal_reviewer']::public.assay_role[])
+        or review_decisions.action <> 'dismissed'
+        or exists (select 1 from public.review_findings f
+          where f.organization_id=review_decisions.organization_id
+            and f.review_id=review_decisions.review_id
+            and f.finding_key=review_decisions.finding_key and f.severity <> 'high'))));
 create policy assets_select_review on public.review_assets for select to authenticated
   using (exists (select 1 from public.reviews r where r.organization_id=review_assets.organization_id
     and r.id=review_assets.review_id and private.assay_can_view_review(r.organization_id,r.created_by,r.assigned_reviewer)));
@@ -787,7 +833,7 @@ create policy review_assets_storage_delete on storage.objects for delete to auth
   ));
 
 revoke all on public.organizations, public.organization_members, public.workspace_invitations,
-  public.brand_rules, public.approved_claims, public.reviews, public.review_findings,
+  public.brand_rules, public.approved_claims, public.reviews, public.review_findings, public.review_runs,
   public.review_comments, public.review_events, public.review_revisions, public.review_decisions, public.review_assets, public.organization_events from public, anon, authenticated;
 grant select, insert on public.organizations to authenticated;
 grant update (name) on public.organizations to authenticated;
@@ -797,6 +843,7 @@ grant select, insert, delete on public.workspace_invitations to authenticated;
 grant select, insert, update on public.brand_rules, public.approved_claims to authenticated;
 grant select, insert, update on public.reviews to authenticated;
 grant select on public.review_findings, public.review_events, public.review_revisions, public.review_decisions to authenticated;
+grant select on public.review_runs to authenticated;
 grant insert on public.review_decisions to authenticated;
 grant select, insert, delete on public.review_assets to authenticated;
 grant update (alt_text) on public.review_assets to authenticated;
@@ -811,4 +858,5 @@ create index findings_org_review on public.review_findings(organization_id, revi
 create index comments_org_review on public.review_comments(organization_id, review_id, created_at);
 create index events_org_review on public.review_events(organization_id, review_id, created_at desc);
 create index assets_org_review on public.review_assets(organization_id, review_id, created_at);
+create index runs_org_review on public.review_runs(organization_id, review_id, created_at desc);
 

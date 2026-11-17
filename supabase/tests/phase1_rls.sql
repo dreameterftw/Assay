@@ -12,6 +12,7 @@ values
  ('10000000-0000-4000-8000-000000000003','authenticated','authenticated','manager-a@test.invalid','',now(),now()),
  ('10000000-0000-4000-8000-000000000004','authenticated','authenticated','brand-a@test.invalid','',now(),now()),
  ('10000000-0000-4000-8000-000000000005','authenticated','authenticated','legal-a@test.invalid','',now(),now()),
+ ('10000000-0000-4000-8000-000000000006','authenticated','authenticated','creator-b@test.invalid','',now(),now()),
  ('20000000-0000-4000-8000-000000000001','authenticated','authenticated','owner-b@test.invalid','',now(),now())
 on conflict (id) do nothing;
 
@@ -22,7 +23,8 @@ insert into public.organization_members(organization_id,user_id,role) values
  ('a0000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000002','creator'),
  ('a0000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000003','manager'),
  ('a0000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000004','brand_reviewer'),
- ('a0000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000005','legal_reviewer');
+ ('a0000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000005','legal_reviewer'),
+ ('a0000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000006','creator');
 
 insert into public.workspace_invitations(id,organization_id,email,role,token_hash,invited_by,expires_at)
 values ('b1000000-0000-4000-8000-000000000001','b0000000-0000-4000-8000-000000000001','invite@test.invalid','creator','hash-b','20000000-0000-4000-8000-000000000001',now()+interval '1 day');
@@ -38,19 +40,56 @@ insert into public.reviews(id,organization_id,title,content,created_by)
 values
  ('a4000000-0000-4000-8000-000000000001','a0000000-0000-4000-8000-000000000001','Creator A review','Creator private copy','10000000-0000-4000-8000-000000000002'),
  ('a4000000-0000-4000-8000-000000000002','a0000000-0000-4000-8000-000000000001','Manager A review','Manager private copy','10000000-0000-4000-8000-000000000003'),
+ ('a4000000-0000-4000-8000-000000000004','a0000000-0000-4000-8000-000000000001','Manager own','Own copy','10000000-0000-4000-8000-000000000003'),
+ ('a4000000-0000-4000-8000-000000000006','a0000000-0000-4000-8000-000000000001','Stale run','Stale copy','10000000-0000-4000-8000-000000000002'),
+ ('a4000000-0000-4000-8000-000000000007','a0000000-0000-4000-8000-000000000001','Other creator asset','Private asset','10000000-0000-4000-8000-000000000006'),
  ('b4000000-0000-4000-8000-000000000001','b0000000-0000-4000-8000-000000000001','B review','Secret Org B content','20000000-0000-4000-8000-000000000001');
 insert into public.reviews(id,organization_id,title,content,assigned_reviewer,created_by)
 values ('a4000000-0000-4000-8000-000000000005','a0000000-0000-4000-8000-000000000001','Assigned to Creator','Assigned copy','10000000-0000-4000-8000-000000000002','10000000-0000-4000-8000-000000000003');
-insert into public.review_findings(id,organization_id,review_id,source_kind,rule_id,category,severity,state,title,explanation)
+insert into public.review_runs(organization_id,review_id,requested_by,content_sha256,rule_snapshot,finding_count,engine_version)
 values
- ('a5000000-0000-4000-8000-000000000001','a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000002','rule','a2000000-0000-4000-8000-000000000001','tone','high','violation','Manager finding','Private finding'),
- ('a5000000-0000-4000-8000-000000000005','a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000005','rule','a2000000-0000-4000-8000-000000000001','tone','low','likely','Assigned finding','Visible to assigned creator'),
- ('b5000000-0000-4000-8000-000000000001','b0000000-0000-4000-8000-000000000001','b4000000-0000-4000-8000-000000000001','rule','b2000000-0000-4000-8000-000000000001','tone','high','violation','B finding','Private Org B finding');
-insert into public.review_comments(id,organization_id,review_id,author_id,body)
+ ('a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000004','10000000-0000-4000-8000-000000000003',encode(sha256(convert_to('Own copy','utf8')),'hex'),'[]',0,'test'),
+ ('a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000006','10000000-0000-4000-8000-000000000002',encode(sha256(convert_to('Stale copy','utf8')),'hex'),'[]',0,'test');
+insert into public.review_findings(id,organization_id,review_id,finding_key,source_kind,rule_id,category,severity,state,title,explanation)
 values
- ('a6000000-0000-4000-8000-000000000001','a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000002','10000000-0000-4000-8000-000000000003','Private manager comment'),
- ('a6000000-0000-4000-8000-000000000005','a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000005','10000000-0000-4000-8000-000000000003','Assigned review comment'),
- ('b6000000-0000-4000-8000-000000000001','b0000000-0000-4000-8000-000000000001','b4000000-0000-4000-8000-000000000001','20000000-0000-4000-8000-000000000001','B comment');
+ ('a5000000-0000-4000-8000-000000000001','a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000002','seed-manager-finding','rule','a2000000-0000-4000-8000-000000000001','tone','high','violation','Manager finding','Private finding'),
+ ('a5000000-0000-4000-8000-000000000005','a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000005','seed-assigned-finding','rule','a2000000-0000-4000-8000-000000000001','tone','low','likely','Assigned finding','Visible to assigned creator'),
+ ('a5000000-0000-4000-8000-000000000007','a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000006','seed-low-finding','rule','a2000000-0000-4000-8000-000000000001','tone','low','likely','Creator low finding','Dismissal requires a reason'),
+ ('a5000000-0000-4000-8000-000000000006','a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000006','seed-high-finding','rule','a2000000-0000-4000-8000-000000000001','tone','high','violation','High finding','Cannot be dismissed by its creator'),
+ ('b5000000-0000-4000-8000-000000000001','b0000000-0000-4000-8000-000000000001','b4000000-0000-4000-8000-000000000001','seed-b-finding','rule','b2000000-0000-4000-8000-000000000001','tone','high','violation','B finding','Private Org B finding');
+insert into public.review_assets(id,organization_id,review_id,object_path,filename,mime_type,size_bytes,width,height,uploaded_by)
+values ('a9000000-0000-4000-8000-000000000001','a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000001',
+  'a0000000-0000-4000-8000-000000000001/a4000000-0000-4000-8000-000000000001/10000000-0000-4000-8000-000000000002/a9000000-0000-4000-8000-000000000001.png',
+  'private.png','image/png',1,1,1,'10000000-0000-4000-8000-000000000002');
+insert into storage.objects(bucket_id,name)
+values ('assay-review-assets','a0000000-0000-4000-8000-000000000001/a4000000-0000-4000-8000-000000000001/10000000-0000-4000-8000-000000000002/a9000000-0000-4000-8000-000000000001.png');
+insert into public.review_assets(id,organization_id,review_id,object_path,filename,mime_type,size_bytes,width,height,uploaded_by)
+values ('a9000000-0000-4000-8000-000000000012','a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000002',
+  'a0000000-0000-4000-8000-000000000001/a4000000-0000-4000-8000-000000000002/10000000-0000-4000-8000-000000000002/a9000000-0000-4000-8000-000000000012.png',
+  'cap-12.png','image/png',1,1,1,'10000000-0000-4000-8000-000000000002');
+insert into public.review_assets(id,organization_id,review_id,object_path,filename,mime_type,size_bytes,width,height,uploaded_by)
+select ('a9000000-0000-4000-8000-'||lpad(asset_no::text,12,'0'))::uuid,
+  'a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000002',
+  'a0000000-0000-4000-8000-000000000001/a4000000-0000-4000-8000-000000000002/10000000-0000-4000-8000-000000000002/'||
+    ('a9000000-0000-4000-8000-'||lpad(asset_no::text,12,'0'))||'.png',
+  'cap-'||asset_no||'.png','image/png',1,1,1,'10000000-0000-4000-8000-000000000002'
+from generate_series(2,10) asset_no;
+do $$
+begin
+  begin
+    insert into public.review_assets(id,organization_id,review_id,object_path,filename,mime_type,size_bytes,width,height,uploaded_by)
+    values ('a9000000-0000-4000-8000-000000000011','a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000002',
+      'a0000000-0000-4000-8000-000000000001/a4000000-0000-4000-8000-000000000002/10000000-0000-4000-8000-000000000002/a9000000-0000-4000-8000-000000000011.png',
+      'over-cap.png','image/png',1,1,1,'10000000-0000-4000-8000-000000000002');
+    raise exception 'Review asset cap was not enforced';
+  exception when program_limit_exceeded then null;
+  end;
+end $$;
+insert into public.review_comments(id,organization_id,review_id,author_id,body,visibility)
+values
+ ('a6000000-0000-4000-8000-000000000001','a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000002','10000000-0000-4000-8000-000000000003','Private manager comment','internal'),
+ ('a6000000-0000-4000-8000-000000000005','a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000005','10000000-0000-4000-8000-000000000003','Assigned review comment','shared'),
+ ('b6000000-0000-4000-8000-000000000001','b0000000-0000-4000-8000-000000000001','b4000000-0000-4000-8000-000000000001','20000000-0000-4000-8000-000000000001','B comment','shared');
 insert into public.review_revisions(id,organization_id,review_id,author_id,content_snapshot,label)
 values
  ('a8000000-0000-4000-8000-000000000001','a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000002','10000000-0000-4000-8000-000000000003','Private manager snapshot','initial'),
@@ -72,7 +111,7 @@ do $$
 declare actor record; table_name text; visible_count bigint; changed_count bigint; denied boolean;
   target_org uuid; asset_review_id uuid; asset_id uuid;
   table_names text[] := array['organizations','organization_members','workspace_invitations','brand_rules',
-    'approved_claims','reviews','review_findings','review_comments','review_events','review_revisions','review_decisions','review_assets','organization_events'];
+    'approved_claims','reviews','review_findings','review_runs','review_comments','review_events','review_revisions','review_decisions','review_assets','organization_events'];
 begin
   -- Cross-organization reads/writes for all five roles and the second org's owner.
   for actor in select * from (values
@@ -113,7 +152,8 @@ begin
             when 'brand_rules' then insert into public.brand_rules(organization_id,rule_key,version,category,title,description,severity,created_by) values (target_org,gen_random_uuid()::text,1,'tone','denied','denied','low',actor.id);
             when 'approved_claims' then insert into public.approved_claims(organization_id,statement,evidence_label,owner_label,created_by) values (target_org,'denied','denied','denied',actor.id);
             when 'reviews' then insert into public.reviews(organization_id,title,content,created_by) values (target_org,'denied','denied',actor.id);
-            when 'review_findings' then insert into public.review_findings(organization_id,review_id,source_kind,rule_id,category,severity,state,title,explanation) values (target_org,'b4000000-0000-4000-8000-000000000001','rule','b2000000-0000-4000-8000-000000000001','tone','low','violation','denied','denied');
+            when 'review_findings' then insert into public.review_findings(organization_id,review_id,finding_key,source_kind,rule_id,category,severity,state,title,explanation) values (target_org,'b4000000-0000-4000-8000-000000000001','denied-'||actor.id::text,'rule','b2000000-0000-4000-8000-000000000001','tone','low','violation','denied','denied');
+            when 'review_runs' then insert into public.review_runs(organization_id,review_id,requested_by,content_sha256,rule_snapshot,finding_count,engine_version) values (target_org,'b4000000-0000-4000-8000-000000000001',actor.id,repeat('0',64),'[]',0,'test');
             when 'review_comments' then insert into public.review_comments(organization_id,review_id,author_id,body) values (target_org,'b4000000-0000-4000-8000-000000000001',actor.id,'denied');
             when 'review_events' then insert into public.review_events(organization_id,review_id,actor_id,action,rule_set_version) values (target_org,'b4000000-0000-4000-8000-000000000001',actor.id,'denied',1);
             when 'review_revisions' then insert into public.review_revisions(organization_id,review_id,author_id,content_snapshot,label) values (target_org,'b4000000-0000-4000-8000-000000000001',actor.id,'denied','denied');
@@ -158,11 +198,11 @@ begin
   -- A creator sees only their own/assigned reviews and child rows, and only active approved rules.
   perform set_config('request.jwt.claim.sub','10000000-0000-4000-8000-000000000002',true);
   perform set_config('request.jwt.claims','{"sub":"10000000-0000-4000-8000-000000000002","role":"authenticated"}',true);
-  if (select count(*) from public.reviews where organization_id='a0000000-0000-4000-8000-000000000001') <> 2 then raise exception 'Creator sees another review or cannot see an assigned review'; end if;
+  if (select count(*) from public.reviews where organization_id='a0000000-0000-4000-8000-000000000001') <> 3 then raise exception 'Creator sees another review or cannot see an assigned review'; end if;
   if (select count(*) from public.reviews where id='a4000000-0000-4000-8000-000000000002') <> 0 then raise exception 'Creator sees another creator review'; end if;
-  if (select count(*) from public.review_findings where organization_id='a0000000-0000-4000-8000-000000000001') <> 1 then raise exception 'Creator child finding scope is incorrect'; end if;
+  if (select count(*) from public.review_findings where organization_id='a0000000-0000-4000-8000-000000000001') <> 3 then raise exception 'Creator child finding scope is incorrect'; end if;
   if (select count(*) from public.review_comments where organization_id='a0000000-0000-4000-8000-000000000001') <> 1 then raise exception 'Creator child comment scope is incorrect'; end if;
-  if (select count(*) from public.review_events where organization_id='a0000000-0000-4000-8000-000000000001') <> 2 then raise exception 'Creator child event scope is incorrect'; end if;
+  if (select count(*) from public.review_events where organization_id='a0000000-0000-4000-8000-000000000001') <> 4 then raise exception 'Creator child event scope is incorrect'; end if;
   if (select count(*) from public.review_revisions where organization_id='a0000000-0000-4000-8000-000000000001') <> 1 then raise exception 'Creator child revision scope is incorrect'; end if;
   if (select count(*) from public.brand_rules where organization_id='a0000000-0000-4000-8000-000000000001') <> 1 then raise exception 'Creator sees draft or retired rules'; end if;
 
@@ -189,6 +229,15 @@ begin
   insert into public.reviews(id,organization_id,title,content,created_by)
   values ('a4000000-0000-4000-8000-000000000003','a0000000-0000-4000-8000-000000000001','Creator draft','New copy','10000000-0000-4000-8000-000000000002');
   denied := false;
+  begin update public.reviews set status='submitted' where id='a4000000-0000-4000-8000-000000000003';
+  exception when insufficient_privilege then denied := true; end;
+  if not denied then raise exception 'Creator submitted without a review run'; end if;
+  update public.reviews set content='Changed after the check' where id='a4000000-0000-4000-8000-000000000006';
+  denied := false;
+  begin update public.reviews set status='submitted' where id='a4000000-0000-4000-8000-000000000006';
+  exception when insufficient_privilege then denied := true; end;
+  if not denied then raise exception 'Creator submitted with a stale review run'; end if;
+  denied := false;
   begin update public.reviews set risk_tier='high' where id='a4000000-0000-4000-8000-000000000003';
   exception when insufficient_privilege then denied := true; end;
   if not denied then raise exception 'Creator changed risk tier'; end if;
@@ -196,22 +245,41 @@ begin
   begin update public.reviews set status='approved' where id='a4000000-0000-4000-8000-000000000003';
   exception when insufficient_privilege then denied := true; end;
   if not denied then raise exception 'Creator self-approved'; end if;
-  update public.reviews set status='submitted' where id='a4000000-0000-4000-8000-000000000003';
-  if (select jsonb_array_length(rule_snapshot) from public.reviews where id='a4000000-0000-4000-8000-000000000003') <> 1 then raise exception 'Submission did not snapshot approved rule ID/version'; end if;
   denied := false;
   begin update public.reviews set status='approved' where id='a4000000-0000-4000-8000-000000000003';
   exception when insufficient_privilege then denied := true; end;
   if not denied then raise exception 'Creator self-approved a submitted review'; end if;
   denied := false;
-  begin insert into public.review_findings(organization_id,review_id,source_kind,category,severity,state,title,explanation)
-    values ('a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000003','image_check','visual','low','likely','fake','fake');
+  begin insert into public.review_findings(organization_id,review_id,finding_key,source_kind,category,severity,state,title,explanation)
+    values ('a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000003','client-fake','image_check','visual','low','likely','fake','fake');
   exception when insufficient_privilege then denied := true; end;
   if not denied then raise exception 'Client inserted a finding'; end if;
+  denied := false;
+  begin update public.review_findings set title='client update' where review_id='a4000000-0000-4000-8000-000000000005';
+  exception when insufficient_privilege then denied := true; end;
+  if not denied then raise exception 'Client updated a finding'; end if;
+  denied := false;
+  begin delete from public.review_findings where review_id='a4000000-0000-4000-8000-000000000005';
+  exception when insufficient_privilege then denied := true; end;
+  if not denied then raise exception 'Client deleted a finding'; end if;
+  denied := false;
+  begin insert into public.review_runs(organization_id,review_id,requested_by,content_sha256,rule_snapshot,finding_count,engine_version)
+    values ('a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000002',repeat('0',64),'[]',0,'test');
+  exception when insufficient_privilege then denied := true; end;
+  if not denied then raise exception 'Client inserted a review run'; end if;
+  denied := false;
+  begin update public.review_runs set finding_count=1 where review_id='a4000000-0000-4000-8000-000000000006';
+  exception when insufficient_privilege then denied := true; end;
+  if not denied then raise exception 'Client updated a review run'; end if;
+  denied := false;
+  begin delete from public.review_runs where review_id='a4000000-0000-4000-8000-000000000006';
+  exception when insufficient_privilege then denied := true; end;
+  if not denied then raise exception 'Client deleted a review run'; end if;
   insert into public.review_decisions(organization_id,review_id,finding_key,finding_title,action,actor_id)
     values ('a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000003','test-key','Test finding','resolved','10000000-0000-4000-8000-000000000002');
   denied := false;
   begin insert into public.review_decisions(organization_id,review_id,finding_key,finding_title,action,actor_id)
-    values ('a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000003','dismiss-key','Dismissed finding','dismissed','10000000-0000-4000-8000-000000000002');
+    values ('a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000006','seed-low-finding','Creator low finding','dismissed','10000000-0000-4000-8000-000000000002');
   exception when check_violation then denied := true; end;
   if not denied then raise exception 'Dismissal without a reason succeeded'; end if;
   denied := false;
@@ -227,12 +295,85 @@ begin
     values ('a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000002','fake',1);
   exception when insufficient_privilege then denied := true; end;
   if not denied then raise exception 'Client inserted an audit event'; end if;
-
-  -- Manager cannot approve their own review; high risk requires legal/admin approval.
+  denied := false;
+  begin update public.review_events set action='tampered' where review_id='a4000000-0000-4000-8000-000000000005';
+  exception when insufficient_privilege then denied := true; end;
+  if not denied then raise exception 'Client updated an audit event'; end if;
+  denied := false;
+  begin delete from public.review_events where review_id='a4000000-0000-4000-8000-000000000005';
+  exception when insufficient_privilege then denied := true; end;
+  if not denied then raise exception 'Client deleted an audit event'; end if;
+  denied := false;
+  begin insert into public.review_decisions(organization_id,review_id,finding_key,finding_title,action,reason,actor_id)
+    values ('a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000006','seed-high-finding','High finding','dismissed','not applicable','10000000-0000-4000-8000-000000000002');
+  exception when insufficient_privilege then denied := true; end;
+  if not denied then raise exception 'Creator dismissed a high-severity finding'; end if;
+  denied := false;
+  begin insert into public.review_decisions(organization_id,review_id,finding_key,finding_title,action,reason,actor_id)
+    values ('a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000006','made-up-key','Made up','dismissed','not applicable','10000000-0000-4000-8000-000000000002');
+  exception when insufficient_privilege then denied := true; end;
+  if not denied then raise exception 'Creator dismissed a nonexistent finding key'; end if;
+  denied := false;
+  begin insert into storage.objects(bucket_id,name)
+    values ('assay-review-assets','a0000000-0000-4000-8000-000000000001/a4000000-0000-4000-8000-000000000001/10000000-0000-4000-8000-000000000002/ffffffff-ffff-4fff-8fff-ffffffffffff.png');
+  exception when insufficient_privilege then denied := true; end;
+  if not denied then raise exception 'Creator uploaded an object to a spoofed path'; end if;
+  perform set_config('request.jwt.claim.sub','10000000-0000-4000-8000-000000000006',true);
+  perform set_config('request.jwt.claims','{"sub":"10000000-0000-4000-8000-000000000006","role":"authenticated"}',true);
+  if exists (select 1 from storage.objects where bucket_id='assay-review-assets'
+    and name='a0000000-0000-4000-8000-000000000001/a4000000-0000-4000-8000-000000000001/10000000-0000-4000-8000-000000000002/a9000000-0000-4000-8000-000000000001.png') then
+    raise exception 'Creator read another creator storage object';
+  end if;
+end;
+$$;
+reset role;
+select set_config('request.jwt.claim.sub','',true);
+select set_config('request.jwt.claims','{}',true);
+do $$
+begin
+  if auth.uid() is not null then raise exception 'Server test context still has a user identity'; end if;
+end $$;
+insert into public.review_runs(organization_id,review_id,requested_by,content_sha256,rule_snapshot,finding_count,engine_version)
+values ('a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000002',encode(sha256(convert_to('New copy','utf8')),'hex'),'[]',0,'test');
+insert into public.review_findings(organization_id,review_id,finding_key,source_kind,rule_id,category,severity,state,title,explanation)
+values ('a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000003','server-test-finding','rule','a2000000-0000-4000-8000-000000000001','tone','low','likely','Server finding','Created by the server');
+delete from public.review_findings where organization_id='a0000000-0000-4000-8000-000000000001' and review_id='a4000000-0000-4000-8000-000000000003' and finding_key='server-test-finding';
+set local role authenticated;
+do $$
+declare denied boolean; changed_count bigint;
+begin
+  perform set_config('request.jwt.claim.sub','10000000-0000-4000-8000-000000000002',true);
+  perform set_config('request.jwt.claims','{"sub":"10000000-0000-4000-8000-000000000002","role":"authenticated"}',true);
+  update public.reviews set status='submitted' where id='a4000000-0000-4000-8000-000000000003';
+  if (select jsonb_array_length(rule_snapshot) from public.reviews where id='a4000000-0000-4000-8000-000000000003') <> 1 then raise exception 'Submission did not snapshot approved rule ID/version'; end if;
+  denied := false;
+  changed_count := 0;
+  begin
+    update public.reviews set status='approved' where id='a4000000-0000-4000-8000-000000000003';
+    get diagnostics changed_count = row_count;
+  exception when insufficient_privilege then denied := true; end;
+  if not denied and changed_count <> 0 then raise exception 'Creator self-approved a submitted review'; end if;
+end;
+$$;
+reset role;
+select set_config('request.jwt.claim.sub','',true);
+select set_config('request.jwt.claims','{}',true);
+set local role authenticated;
+do $$
+declare denied boolean;
+begin
   perform set_config('request.jwt.claim.sub','10000000-0000-4000-8000-000000000003',true);
   perform set_config('request.jwt.claims','{"sub":"10000000-0000-4000-8000-000000000003","role":"authenticated"}',true);
-  insert into public.reviews(id,organization_id,title,content,created_by)
-  values ('a4000000-0000-4000-8000-000000000004','a0000000-0000-4000-8000-000000000001','Manager own','Own copy','10000000-0000-4000-8000-000000000003');
+  if (select count(*) from public.review_comments where visibility='internal') <> 1 then raise exception 'Reviewer cannot read internal notes'; end if;
+  denied := false;
+  begin insert into public.workspace_invitations(organization_id,email,role,token_hash,invited_by,expires_at)
+    values ('a0000000-0000-4000-8000-000000000001','legal-invite@test.invalid','legal_reviewer','manager-legal-test','10000000-0000-4000-8000-000000000003',now()+interval '1 day');
+  exception when insufficient_privilege then denied := true; end;
+  if not denied then raise exception 'Manager invited a legal reviewer'; end if;
+  insert into public.review_decisions(organization_id,review_id,finding_key,finding_title,action,reason,actor_id)
+    values ('a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000006','seed-high-finding','High finding','dismissed','Manager reviewed the evidence','10000000-0000-4000-8000-000000000003');
+
+  -- Manager cannot approve their own review; high risk requires legal/admin approval.
   update public.reviews set status='submitted' where id='a4000000-0000-4000-8000-000000000004';
   denied := false;
   begin update public.reviews set status='approved' where id='a4000000-0000-4000-8000-000000000004';
@@ -249,13 +390,29 @@ begin
   if not denied then raise exception 'Manager approved high-risk review without legal'; end if;
   perform set_config('request.jwt.claim.sub','10000000-0000-4000-8000-000000000005',true);
   perform set_config('request.jwt.claims','{"sub":"10000000-0000-4000-8000-000000000005","role":"authenticated"}',true);
+  denied := false;
+  begin update public.reviews set content='Changed during approval',status='approved' where id='a4000000-0000-4000-8000-000000000003';
+  exception when insufficient_privilege then denied := true; end;
+  if not denied then raise exception 'Content changed during approval'; end if;
   update public.reviews set status='approved' where id='a4000000-0000-4000-8000-000000000003';
+  if (select approved_content_sha256 from public.reviews where id='a4000000-0000-4000-8000-000000000003') <> encode(sha256(convert_to('New copy','utf8')),'hex') then raise exception 'Approved content hash was not stored'; end if;
+  update public.reviews set status='waived',waiver_reason='Temporary exception',waiver_expires_at=current_date+30 where id='a4000000-0000-4000-8000-000000000004';
+  denied := false;
+  begin update public.reviews set content='Edited after waiver' where id='a4000000-0000-4000-8000-000000000004';
+  exception when insufficient_privilege then denied := true; end;
+  if not denied then raise exception 'Waived review was mutable'; end if;
 
   -- Approved rule content cannot be changed; approval is recorded by the database.
   perform set_config('request.jwt.claim.sub','10000000-0000-4000-8000-000000000004',true);
   perform set_config('request.jwt.claims','{"sub":"10000000-0000-4000-8000-000000000004","role":"authenticated"}',true);
   update public.brand_rules set status='approved' where id='a2000000-0000-4000-8000-000000000002';
   if (select approved_by from public.brand_rules where id='a2000000-0000-4000-8000-000000000002') <> '10000000-0000-4000-8000-000000000004'::uuid then raise exception 'Rule approval actor missing'; end if;
+  insert into public.brand_rules(id,organization_id,rule_key,version,category,title,description,severity,status,active,created_by)
+    values ('a2000000-0000-4000-8000-000000000004','a0000000-0000-4000-8000-000000000001','approved-a',2,'tone','Approved A v2','Second active version','low','draft',true,'10000000-0000-4000-8000-000000000004');
+  denied := false;
+  begin update public.brand_rules set status='approved' where id='a2000000-0000-4000-8000-000000000004';
+  exception when unique_violation then denied := true; end;
+  if not denied then raise exception 'Two active approved rule versions existed'; end if;
   denied := false;
   begin update public.brand_rules set title='mutated' where id='a2000000-0000-4000-8000-000000000002';
   exception when insufficient_privilege then denied := true; end;
@@ -291,6 +448,7 @@ begin
   perform set_config('request.jwt.claim.sub','10000000-0000-4000-8000-000000000002',true);
   perform set_config('request.jwt.claims','{"sub":"10000000-0000-4000-8000-000000000002","role":"authenticated"}',true);
   delete from public.organization_members where organization_id='a0000000-0000-4000-8000-000000000001' and user_id='10000000-0000-4000-8000-000000000002';
+  if (select assigned_reviewer from public.reviews where id='a4000000-0000-4000-8000-000000000005') is not null then raise exception 'Leaving reviewer remained assigned'; end if;
 
   -- Ownership can be transferred only by the current owner and is audited.
   perform set_config('request.jwt.claim.sub','10000000-0000-4000-8000-000000000001',true);
@@ -308,7 +466,7 @@ set local role anon;
 do $$
 declare t text;
 begin
-  foreach t in array array['organizations','organization_members','workspace_invitations','brand_rules','approved_claims','reviews','review_findings','review_comments','review_events','review_revisions','review_decisions','review_assets','organization_events'] loop
+  foreach t in array array['organizations','organization_members','workspace_invitations','brand_rules','approved_claims','reviews','review_findings','review_runs','review_comments','review_events','review_revisions','review_decisions','review_assets','organization_events'] loop
     if has_table_privilege('anon','public.'||t,'select') or has_table_privilege('anon','public.'||t,'insert')
       or has_table_privilege('anon','public.'||t,'update') or has_table_privilege('anon','public.'||t,'delete') then
       raise exception 'anon has table privilege on %',t;
