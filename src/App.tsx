@@ -92,6 +92,8 @@ function WorkspaceApp({ initialData, workspace, userEmail, accessToken, syncStat
   const hasCurrentRun = Boolean(activeContentSha256
     && active.latestRunContentSha256 === activeContentSha256
     && active.latestRunIsCurrent)
+  const hasValidApprovalRun = Boolean(active.latestRunIsCurrent && active.latestRunValidUntil
+    && Date.parse(active.latestRunValidUntil) > Date.now())
   const canInviteMembers = ['admin', 'manager'].includes(workspace.role)
   const inviteRoleOptions = workspace.role === 'admin'
     ? [{ value: 'creator', label: 'Creator' }, { value: 'manager', label: 'Manager' }, { value: 'brand_reviewer', label: 'Brand reviewer' }, { value: 'legal_reviewer', label: 'Legal reviewer' }]
@@ -99,10 +101,12 @@ function WorkspaceApp({ initialData, workspace, userEmail, accessToken, syncStat
   const eligibleReviewers = workspace.members.filter((member) => member.userId !== workspace.currentUserId && member.role !== 'Creator' && (!activeHighRisk || ['Legal reviewer', 'Admin'].includes(member.role)))
   const canApproveActive = canReviewWorkflow && active.createdById !== workspace.currentUserId
     && ['Needs review', 'In review'].includes(active.status)
+    && hasValidApprovalRun
     && (!activeHighRisk || ['legal_reviewer', 'admin'].includes(workspace.role))
     && active.findings.every((finding) => finding.level === 'Clear' || Boolean(finding.decision))
   const canWaiveActive = canReviewWorkflow && active.createdById !== workspace.currentUserId
     && ['Needs review', 'In review'].includes(active.status)
+    && hasValidApprovalRun
     && (!activeHighRisk || ['legal_reviewer', 'admin'].includes(workspace.role))
   useEffect(() => { setAssignedMemberId(active.assignedReviewerId ?? '') }, [active.id, active.assignedReviewerId])
   useEffect(() => {
@@ -152,16 +156,23 @@ function WorkspaceApp({ initialData, workspace, userEmail, accessToken, syncStat
 
   async function refreshReviewHistory(reviewId: string): Promise<boolean> {
     if (!supabase) return false
-    const [findingsResult, commentsResult, eventsResult, revisionsResult, decisionsResult, runsResult, currentRunResult] = await Promise.all([
+    const [reviewResult, findingsResult, commentsResult, eventsResult, revisionsResult, decisionsResult, runsResult, currentRunResult] = await Promise.all([
+      supabase.from('reviews').select('approved_run_id').eq('organization_id', workspace.id).eq('id', reviewId).maybeSingle(),
       supabase.from('review_findings').select('*').eq('organization_id', workspace.id).eq('review_id', reviewId).order('created_at'),
       supabase.from('review_comments').select('*').eq('organization_id', workspace.id).eq('review_id', reviewId).order('created_at'),
       supabase.from('review_events').select('*').eq('organization_id', workspace.id).eq('review_id', reviewId).order('created_at', { ascending: false }),
       supabase.from('review_revisions').select('*').eq('organization_id', workspace.id).eq('review_id', reviewId).order('created_at', { ascending: false }),
       supabase.from('review_decisions').select('*').eq('organization_id', workspace.id).eq('review_id', reviewId).order('created_at', { ascending: false }),
-      supabase.from('review_runs').select('content_sha256').eq('organization_id', workspace.id).eq('review_id', reviewId).order('created_at', { ascending: false }).limit(1),
+      supabase.from('review_runs').select('content_sha256,valid_until').eq('organization_id', workspace.id).eq('review_id', reviewId).order('created_at', { ascending: false }).limit(1),
       supabase.rpc('assay_review_has_current_run', { target_review: reviewId }),
     ])
-    const queryError = [findingsResult.error, commentsResult.error, eventsResult.error, revisionsResult.error, decisionsResult.error, runsResult.error, currentRunResult.error].find(Boolean)
+    const approvedRunId = reviewResult.data?.approved_run_id as string | null | undefined
+    const approvedRunResult = approvedRunId
+      ? await supabase.from('review_runs')
+        .select('id,content_sha256,rules_sha256,claims_sha256,asset_snapshot,rule_snapshot,claim_snapshot,valid_until')
+        .eq('organization_id', workspace.id).eq('review_id', reviewId).eq('id', approvedRunId).maybeSingle()
+      : { data: null, error: null }
+    const queryError = [reviewResult.error, findingsResult.error, commentsResult.error, eventsResult.error, revisionsResult.error, decisionsResult.error, runsResult.error, currentRunResult.error, approvedRunResult.error].find(Boolean)
     if (queryError) {
       console.error('Could not refresh review details:', queryError)
       setNotice('Could not refresh this review. Try again.')
@@ -207,7 +218,19 @@ function WorkspaceApp({ initialData, workspace, userEmail, accessToken, syncStat
       })),
       decisions,
       findings: findings.map((finding) => ({ ...finding, decision: decisionByKey.get(findingKey(finding)) })),
+      approvedRunId: approvedRunId ?? undefined,
+      approvedRun: approvedRunResult.data ? {
+        id: approvedRunResult.data.id,
+        contentSha256: approvedRunResult.data.content_sha256,
+        rulesSha256: approvedRunResult.data.rules_sha256,
+        claimsSha256: approvedRunResult.data.claims_sha256,
+        assetSnapshot: approvedRunResult.data.asset_snapshot,
+        ruleSnapshot: approvedRunResult.data.rule_snapshot,
+        claimSnapshot: approvedRunResult.data.claim_snapshot,
+        validUntil: approvedRunResult.data.valid_until,
+      } : undefined,
       latestRunContentSha256: runsResult.data?.[0]?.content_sha256,
+      latestRunValidUntil: runsResult.data?.[0]?.valid_until,
       latestRunIsCurrent: currentRunResult.data === true,
     })))
     return true
@@ -272,7 +295,7 @@ function WorkspaceApp({ initialData, workspace, userEmail, accessToken, syncStat
       if (!response.ok) throw new Error(payload.error || 'Invitation could not be created.')
       setInviteEmail('')
       setInviteRole('creator')
-      setInviteMessage('Invitation created. The link is sent to the workspace member by email when the provider is configured.')
+      setInviteMessage('Invitation email sent.')
       const { data, error } = await client.from('workspace_invitations')
         .select('id, email, role, expires_at, created_at')
         .eq('organization_id', workspace.id)
@@ -333,6 +356,10 @@ function WorkspaceApp({ initialData, workspace, userEmail, accessToken, syncStat
   }
 
   async function approveReview() {
+    if (!hasValidApprovalRun) {
+      setNotice('Run the check again before approval; the run is stale or its claim evidence has expired.')
+      return
+    }
     if (!canApproveActive) { setNotice('This review needs another authorized reviewer or a completed decision set.'); return }
     if (active.findings.some((finding) => finding.level !== 'Clear' && !finding.decision)) {
       setNotice('Resolve or dismiss the open findings before approval.')
@@ -348,6 +375,10 @@ function WorkspaceApp({ initialData, workspace, userEmail, accessToken, syncStat
   }
 
   async function waiveReview() {
+    if (!hasValidApprovalRun) {
+      setNotice('Run the check again before waiving; the run is stale or its claim evidence has expired.')
+      return
+    }
     if (!canWaiveActive) { setNotice('A different authorized reviewer must waive this review.'); return }
     const reason = window.prompt('Why is this review being waived?')
     if (!reason?.trim()) return
@@ -674,6 +705,7 @@ function WorkspaceApp({ initialData, workspace, userEmail, accessToken, syncStat
       product: 'Assay', reviewId: active.id, title: active.title, channel: active.channel, status: active.status,
       submittedBy: active.owner, assignedReviewer: active.reviewer ?? 'Unassigned', riskTier: active.riskTier ?? 'Not assessed',
       content: active.content, image: active.image ? { ...active.image, dataUrl: '[omitted from text export; image remains local to this browser]' } : undefined, ruleSetVersion: active.ruleSetVersion ?? 1, ruleSnapshot: active.ruleSnapshot ?? [], findings: active.findings, comments: active.comments ?? [],
+      approvedRun: active.approvedRun,
       decisions: active.decisions ?? [], revisions: (active.revisions ?? []).map(({ id, author, label, createdAt, content }) => ({ id, author, label, createdAt, content })),
       aiDisclosure: 'AI review is disabled. Only deterministic checks and human decisions are recorded.', generatedAt: new Date().toISOString(),
     }
@@ -804,13 +836,29 @@ function App() {
   const [workspaceLoading, setWorkspaceLoading] = useState(false)
   const [workspaceAttempt, setWorkspaceAttempt] = useState(0)
   const [workspaceError, setWorkspaceError] = useState('')
+  const [inviteToken, setInviteToken] = useState<string | null>(null)
   const [inviteAttempt, setInviteAttempt] = useState(0)
   const [inviteComplete, setInviteComplete] = useState(false)
   const [inviteBusy, setInviteBusy] = useState(false)
   const [inviteError, setInviteError] = useState('')
   const [syncStatus, setSyncStatus] = useState<'saved' | 'saving' | 'error'>('saved')
   const saveQueue = useRef<Promise<void>>(Promise.resolve())
-  const inviteToken = new URLSearchParams(window.location.search).get('invite')
+
+  useEffect(() => {
+    const url = new URL(window.location.href)
+    const queryToken = url.searchParams.get('invite') ?? url.searchParams.get('token')
+    const savedToken = window.sessionStorage.getItem('assay-invite-token')
+    const token = queryToken ?? savedToken
+    if (token) {
+      window.sessionStorage.setItem('assay-invite-token', token)
+      setInviteToken(token)
+    }
+    if (url.searchParams.has('invite') || url.searchParams.has('token')) {
+      url.searchParams.delete('invite')
+      url.searchParams.delete('token')
+      window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`)
+    }
+  }, [])
 
   useEffect(() => {
     clearLegacyWorkspaceMirror()
@@ -866,7 +914,8 @@ function App() {
       const result = await response.json() as { organization_id?: string; error?: string }
       if (!response.ok || !result.organization_id) throw new Error(result.error || 'Invitation could not be accepted.')
       if (!alive) return
-      window.history.replaceState(null, '', `${window.location.pathname}${window.location.hash}`)
+      window.sessionStorage.removeItem('assay-invite-token')
+      setInviteToken(null)
       setInviteComplete(true)
       setSelectedOrganizationId(result.organization_id)
       setWorkspace(null)
@@ -902,7 +951,7 @@ function App() {
 
   if (!supabase) return <SetupRequired />
   if (!authReady) return <StartupScreen message="Checking your sign-in…" />
-  if (!session) return <AuthScreen invitationPending={Boolean(inviteToken)} />
+  if (!session) return <AuthScreen invitationPending={Boolean(inviteToken)} invitationToken={inviteToken ?? undefined} />
   if (inviteToken && !inviteComplete) {
     if (inviteError) return <InvitationError message={inviteError} onRetry={() => setInviteAttempt((attempt) => attempt + 1)} onSignOut={signOut} />
     return <StartupScreen message={inviteBusy ? 'Accepting your workspace invitation…' : 'Preparing your invitation…'} />
@@ -917,7 +966,7 @@ function SetupRequired() {
   return <main className="auth-shell"><section className="auth-card"><div className="auth-brand"><span className="brand-mark">A</span><strong>assay<span className="brand-period">.</span></strong></div><span className="brain-overline">DEPLOYMENT SETUP REQUIRED</span><h1>Connect your workspace database</h1><p>Assay is configured for authenticated Supabase workspaces. Add the project URL and publishable key to Vercel’s environment settings, then redeploy.</p><div className="env-instructions"><code>VITE_SUPABASE_URL</code><code>VITE_SUPABASE_PUBLISHABLE_KEY</code></div><small>The publishable key is designed for browser use. Never add a service-role or secret key to a VITE_ variable.</small></section></main>
 }
 
-function AuthScreen({ invitationPending = false }: { invitationPending?: boolean }) {
+function AuthScreen({ invitationPending = false, invitationToken }: { invitationPending?: boolean; invitationToken?: string }) {
   const [signUp, setSignUp] = useState(false)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -931,10 +980,12 @@ function AuthScreen({ invitationPending = false }: { invitationPending?: boolean
     setBusy(true); setError(''); setMessage('')
     try {
       if (signUp) {
+        const emailRedirectUrl = new URL(window.location.href)
+        if (invitationToken) emailRedirectUrl.searchParams.set('invite', invitationToken)
         const { data, error: authError } = await supabase.auth.signUp({
           email: email.trim(),
           password,
-          options: invitationPending ? { emailRedirectTo: window.location.href } : undefined,
+          options: invitationPending ? { emailRedirectTo: emailRedirectUrl.toString() } : undefined,
         })
         if (authError) throw authError
         if (!data.session) setMessage('Check your email for a confirmation link, then return here to sign in.')
@@ -998,13 +1049,13 @@ function ReviewCollaboration({ review, role, author, commentText, setCommentText
 function PassportModal({ review, onClose, onExport }: { review: Review; onClose: () => void; onExport: () => void }) {
   const resolved = review.findings.filter((item) => Boolean(item.decision)).length
   const openFindings = review.findings.filter((item) => item.level !== 'Clear' && !item.decision).length
-  return <div className="modal-backdrop" role="presentation" onClick={onClose}><section className="passport-modal" role="dialog" aria-modal="true" aria-labelledby="passport-title" onClick={(event) => event.stopPropagation()}><div className="passport-head"><div><span className="passport-mark"><ShieldCheck size={18} /></span><div><div className="brain-overline">PUBLISH READINESS RECORD</div><h2 id="passport-title">Review passport</h2></div></div><button className="icon-button" aria-label="Close passport" onClick={onClose}>×</button></div><div className="passport-status"><span className={`risk-badge ${(review.riskTier ?? 'Standard').toLowerCase()}`}><ShieldCheck size={13} /> {review.status}</span><span>{review.id} · Rule set v{review.ruleSetVersion ?? 1}</span></div><div className="passport-fields"><div><small>Content</small><strong>{review.title}</strong></div><div><small>Submitted by</small><strong>{review.owner}</strong></div><div><small>Reviewer</small><strong>{review.reviewer ?? 'Not assigned'}</strong></div><div><small>Risk tier</small><strong>{review.riskTier ?? 'Not assessed'}</strong></div><div><small>Findings resolved</small><strong>{resolved} decisions · {openFindings} open findings</strong></div><div><small>Rules recorded</small><strong>{review.ruleSnapshot?.length ?? 0} versioned rules</strong></div></div><div className="passport-copy"><small>Reviewed content snapshot</small><p>{review.content}</p></div><div className="passport-disclosure"><ShieldCheck size={14} /> AI review is disabled. This record contains deterministic checks and human decisions; it is not a cryptographic signature.</div><div className="passport-footer"><span>Generated {new Date(review.passportCreatedAt ?? Date.now()).toLocaleString()}</span><button className="primary-button" onClick={onExport}><Download size={14} /> Export JSON</button></div></section></div>
+  return <div className="modal-backdrop" role="presentation" onClick={onClose}><section className="passport-modal" role="dialog" aria-modal="true" aria-labelledby="passport-title" onClick={(event) => event.stopPropagation()}><div className="passport-head"><div><span className="passport-mark"><ShieldCheck size={18} /></span><div><div className="brain-overline">PUBLISH READINESS RECORD</div><h2 id="passport-title">Review passport</h2></div></div><button className="icon-button" aria-label="Close passport" onClick={onClose}>×</button></div><div className="passport-status"><span className={`risk-badge ${(review.riskTier ?? 'Standard').toLowerCase()}`}><ShieldCheck size={13} /> {review.status}</span><span>{review.id} · Rule set v{review.ruleSetVersion ?? 1}</span></div><div className="passport-fields"><div><small>Content</small><strong>{review.title}</strong></div><div><small>Submitted by</small><strong>{review.owner}</strong></div><div><small>Reviewer</small><strong>{review.reviewer ?? 'Not assigned'}</strong></div><div><small>Risk tier</small><strong>{review.riskTier ?? 'Not assessed'}</strong></div><div><small>Findings resolved</small><strong>{resolved} decisions · {openFindings} open findings</strong></div><div><small>Rules recorded</small><strong>{review.approvedRun?.ruleSnapshot && Array.isArray(review.approvedRun.ruleSnapshot) ? review.approvedRun.ruleSnapshot.length : review.ruleSnapshot?.length ?? 0} versioned rules</strong></div><div><small>Approval run</small><strong>{review.approvedRunId ?? 'Not recorded'}</strong></div>{review.approvedRun && <><div><small>Rules snapshot SHA-256</small><strong>{review.approvedRun.rulesSha256}</strong></div><div><small>Claims snapshot SHA-256</small><strong>{review.approvedRun.claimsSha256}</strong></div><div><small>Run valid until</small><strong>{new Date(review.approvedRun.validUntil).toLocaleString()}</strong></div></>}</div><div className="passport-copy"><small>Reviewed content snapshot</small><p>{review.content}</p></div><div className="passport-disclosure"><ShieldCheck size={14} /> AI review is disabled. This record contains deterministic checks and human decisions; it is not a cryptographic signature.</div><div className="passport-footer"><span>Generated {new Date(review.passportCreatedAt ?? Date.now()).toLocaleString()}</span><button className="primary-button" onClick={onExport}><Download size={14} /> Export JSON</button></div></section></div>
 }
 
 function ImageAttachment({ image, busy, editable, onFile, onAlt, onRemove }: { image?: Review['image']; busy: boolean; editable: boolean; onFile: (file?: File) => void; onAlt: (value: string) => void; onRemove: () => void }) {
   const [altText, setAltText] = useState(image?.altText ?? '')
   useEffect(() => setAltText(image?.altText ?? ''), [image?.assetId, image?.altText])
-  return <section className="image-attachment"><div className="panel-title"><ImagePlus size={14} /> Campaign image <span className="image-local-label">PRIVATE STORAGE</span></div>{image ? <div className="attached-image"><img src={image.dataUrl} alt={altText || ''} /><div className="attached-image-details"><div className="image-meta-line"><strong>{image.name}</strong><span>{image.width} × {image.height}px</span>{editable && <button disabled={busy} onClick={onRemove} aria-label="Remove image"><X size={13} /></button>}</div><label className="alt-input"><span>Alt text</span><input disabled={!editable || busy} value={altText} onChange={(event) => setAltText(event.target.value)} onBlur={() => { if (altText !== image.altText) onAlt(altText) }} placeholder="Describe the image for someone who cannot see it" /></label><div className="palette-row"><span>Dominant colors</span>{image.palette.slice(0, 5).map((color) => <i key={color} title={color} style={{ backgroundColor: color }} />)}</div><p>Checks cover alt text, image dimensions, and basic palette distance only.</p></div></div> : editable ? <label className={`image-drop ${busy ? 'busy' : ''}`}><input type="file" accept="image/png,image/jpeg,image/webp" disabled={busy} onChange={(event) => { onFile(event.target.files?.[0]); event.currentTarget.value = '' }} /><ImagePlus size={18} /><span>{busy ? 'Inspecting image…' : 'Add a campaign image'}</span><small>PNG, JPG, or WebP · up to 5 MB · stored in your workspace</small></label> : <p className="empty-history">No campaign image is attached.</p>}</section>
+  return <section className="image-attachment"><div className="panel-title"><ImagePlus size={14} /> Campaign image <span className="image-local-label">PRIVATE STORAGE</span></div>{image ? <div className="attached-image"><img src={image.dataUrl} alt={altText || ''} /><div className="attached-image-details"><div className="image-meta-line"><strong>{image.name}</strong><span>{image.width} × {image.height}px</span>{editable && <button disabled={busy} onClick={onRemove} aria-label="Remove image"><X size={13} /></button>}</div><label className="alt-input"><span>Alt text</span><input disabled={!editable || busy} value={altText} onChange={(event) => setAltText(event.target.value)} onBlur={() => { if (altText !== image.altText) onAlt(altText) }} placeholder="Describe the image for someone who cannot see it" /></label><div className="palette-row"><span>Dominant colors</span>{image.palette.slice(0, 5).map((color) => <i key={color} title={color} style={{ backgroundColor: color }} />)}</div><p>Checks assess alt text, dimensions, and brand palette; tonal contrast is a rough human-review prompt.</p></div></div> : editable ? <label className={`image-drop ${busy ? 'busy' : ''}`}><input type="file" accept="image/png,image/jpeg,image/webp" disabled={busy} onChange={(event) => { onFile(event.target.files?.[0]); event.currentTarget.value = '' }} /><ImagePlus size={18} /><span>{busy ? 'Inspecting image…' : 'Add a campaign image'}</span><small>PNG, JPG, or WebP · up to 5 MB · stored in your workspace</small></label> : <p className="empty-history">No campaign image is attached.</p>}</section>
 }
 
 function RadarView({ radar, onFocusReview }: { radar: ReturnType<typeof buildRadar>; onFocusReview: (id: string) => void }) {

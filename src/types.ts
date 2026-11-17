@@ -34,10 +34,22 @@ export type Review = {
   revisions?: ReviewRevision[]
   decisions?: ReviewDecision[]
   passportCreatedAt?: string
+  approvedRunId?: string
+  approvedRun?: {
+    id: string
+    contentSha256: string
+    rulesSha256: string
+    claimsSha256: string
+    assetSnapshot: unknown
+    ruleSnapshot: unknown
+    claimSnapshot: unknown
+    validUntil: string
+  }
   ruleSetVersion?: number
   ruleSnapshot?: { rule_id: string; rule_key: string; version: number }[]
   latestRunContentSha256?: string
   latestRunIsCurrent?: boolean
+  latestRunValidUntil?: string
   waiverReason?: string
   waiverExpiresAt?: string
   image?: { name: string; dataUrl: string; width: number; height: number; altText: string; palette: string[]; assetId?: string; storagePath?: string }

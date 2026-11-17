@@ -59,3 +59,23 @@ test('image checks emit stable database findings without browser APIs', () => {
   assert.equal(findingKey({ sourceId: asset.id, type: 'image_check', title: 'issue', excerpt: 'x'.repeat(5000) }),
     findingKey({ sourceId: asset.id, type: 'image_check', title: 'issue', excerpt: 'x'.repeat(100) }))
 })
+
+test('image checks report low sampled tonal contrast for human review', () => {
+  const findings = runImageChecks({
+    asset: {
+      id: 'a9000000-0000-4000-8000-000000000002',
+      filename: 'low-contrast.png',
+      width: 1200,
+      height: 800,
+      alt_text: 'Campaign image',
+      palette: ['#777777'],
+    },
+    approvedPalette: [],
+    contrastRatio: 1.4,
+  })
+
+  assert.ok(findings.some((finding) =>
+    finding.category === 'accessibility'
+    && finding.state === 'needs_human_judgement'
+    && finding.title === 'Image tonal contrast may be low'))
+})

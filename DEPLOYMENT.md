@@ -4,7 +4,7 @@
 
 Assay uses a two-project setup for now:
 
-- **Dev and Vercel Preview:** `vxiogubmacymbejlsdnh` (Tokyo, `ap-northeast-1`). The migrations are applied and `supabase/tests/phase1_rls.sql` passes here.
+- **Dev and Vercel Preview:** `vxiogubmacymbejlsdnh` (Tokyo, `ap-northeast-1`). The migration and RLS suite still require verification on the dev project.
 - **Production:** `izhmbumaohbmtdabypii`. Keep it Production-only; no migrations or deployments have been applied there.
 
 A separate staging project is optional and can be added later if Preview needs to be isolated from dev data or production use warrants a dedicated rehearsal environment.
@@ -23,9 +23,9 @@ The region choice is for latency and primary data location, not a compliance gua
 
 1. Use the dev project for local development and Vercel Preview; keep the configured production project for Production only. A dedicated staging project is a later option, not a current prerequisite.
 2. Configure Supabase Auth email confirmation, recovery, allowed redirect URLs for Preview and Production, CAPTCHA, disabled anonymous sign-in, and rate limits. The SQL also limits organization creation to three per user per rolling 24-hour period.
-3. Apply migrations through the Supabase CLI and version control. The current migrations are applied to dev and the RLS suite passes there. Before any production migration, rehearse it on dev and obtain explicit production approval; do not edit production by hand.
-4. Verify multi-organization access, comments, finding decisions, reviewer routing, and audit history in Preview. Invitation acceptance and delivery still need implementation.
-5. The migration provisions a private image bucket (PNG/JPEG/WebP, 5 MB), review-linked metadata, signed URLs, and a concurrency-safe limit of 10 image assets per review. Uploads are enabled after the migration is applied. Malware scanning, lifecycle retention, and deletion controls still need operational setup before confidential production use.
+3. Apply migrations through the Supabase CLI and version control. The latest run/invitation hardening migration and expanded RLS suite still require verification on dev. Before any production migration, rehearse it on dev and obtain explicit production approval; do not edit production by hand.
+4. Verify multi-organization access, comments, finding decisions, reviewer routing, invitation acceptance/delivery, and audit history in Preview.
+5. The migration provisions a private image bucket (PNG/JPEG/WebP, 5 MB), review-linked metadata, signed URLs, and a concurrency-safe limit of 10 image assets per review. Server-side review checks decode stored image bytes and reject missing or mismatched objects. Malware scanning, lifecycle retention, and deletion controls still need operational setup before confidential production use.
 6. Confirm the Vercel account/scope and configure environment-specific variables: Preview uses dev and Production uses production. Browser code uses only `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY`; keep service-role and AI secrets server-side.
 7. Exercise fresh sign-up and a multi-account review cycle in Preview before promoting anything to Production.
 
@@ -48,14 +48,20 @@ The production Vite build requires `VITE_SUPABASE_URL` and generates the CSP `im
 
 ## Server-side review checks
 
-The Vercel `POST /api/run-review` function runs deterministic checks using only approved, active rules and active claims from the organization selected through the review's RLS-protected row. It stores findings, a content-hash run record, and a review event. The function rejects archived, approved, and waived reviews and limits each review to one run every 10 seconds.
+The Vercel `POST /api/run-review` function gets approved active rules, active claims, review content, and assets through a service-role RPC after the caller's review access is verified under RLS. It analyzes stored image bytes server-side, stores findings and content/asset/rule/claim snapshots atomically, and rejects stale inputs. Run records are valid for at most 24 hours and no later than the nearest active claim expiry. Approval and waiver require the current, unexpired run; each review is rate-limited to one run every 10 seconds and 500 findings per run.
+
+Invitations are created through a service-role-only RPC that serializes organization caps, enforces role rules, and counts audit events so revocation does not refund the daily limit. Invitation delivery requires Resend configuration; failed delivery is reported and the pending row is revoked. Set `APP_URL` to the canonical environment origin so the invite link lands on the correct Preview or Production domain.
 
 Configure these variables independently for Preview and Production. They must point to the same Supabase project as the corresponding `VITE_` variables: Preview uses dev, and Production uses production.
 
 - `SUPABASE_URL`
 - `SUPABASE_PUBLISHABLE_KEY`
 - `SUPABASE_SERVICE_ROLE_KEY` — sensitive; server-side only, never use a `VITE_` prefix
+- `APP_URL` — the canonical HTTPS origin used in invitation links; set explicitly for each deployed environment
+- `RESEND_API_KEY` — sensitive; server-side only
+- `INVITATION_FROM_EMAIL` — a verified sender address for Resend
+- `INVITATION_DAILY_LIMIT` — optional, defaults to `20`
 
 Keep the browser variables `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` configured separately. `.env.example` lists variable names only. Do not copy secret values into the repository.
 
-Before deploying the function, apply all migrations to dev and run the RLS test suite. The rate-limit RPC is restricted to the service role. Production remains unchanged until the Preview workflow and release checks pass and production changes are explicitly approved.
+Before deploying the function, apply all migrations to dev and run the RLS test suite. The review-run and invitation RPCs are restricted to the service role. Production remains unchanged until the Preview workflow and release checks pass and production changes are explicitly approved.

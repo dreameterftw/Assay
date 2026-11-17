@@ -3,7 +3,7 @@ import type { VercelRequest, VercelResponse } from '@vercel/node'
 import { createClient } from '@supabase/supabase-js'
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-const allowedRoles = new Set(['creator', 'manager', 'brand_reviewer', 'legal_reviewer']) as Set<string>
+const allowedRoles = new Set(['creator', 'manager', 'brand_reviewer', 'legal_reviewer'])
 const defaultDailyLimit = 20
 
 function respondError(response: VercelResponse, status: number, message: string) {
@@ -19,16 +19,16 @@ export default async function handler(request: VercelRequest, response: VercelRe
     response.setHeader('Allow', 'POST')
     return respondError(response, 405, 'Method not allowed.')
   }
-
   const authorization = request.headers.authorization
   const tokenMatch = typeof authorization === 'string' ? /^Bearer\s+(.+)$/i.exec(authorization) : null
   if (!tokenMatch) return respondError(response, 401, 'Authentication required.')
 
   const body = request.body as { organizationId?: unknown; email?: unknown; role?: unknown } | undefined
-  if (!body || typeof body.organizationId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.organizationId)) {
+  if (!body || typeof body.organizationId !== 'string'
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.organizationId)) {
     return respondError(response, 400, 'A valid organizationId is required.')
   }
-  if (typeof body.email !== 'string' || !emailPattern.test(body.email)) {
+  if (typeof body.email !== 'string' || !emailPattern.test(body.email.trim())) {
     return respondError(response, 400, 'A valid email address is required.')
   }
   const email = normalizeEmail(body.email)
@@ -43,6 +43,36 @@ export default async function handler(request: VercelRequest, response: VercelRe
     return respondError(response, 500, 'Invitation could not be created.')
   }
 
+  const apiKey = process.env.RESEND_API_KEY
+  const fromAddress = process.env.INVITATION_FROM_EMAIL
+  if (!apiKey || !fromAddress) {
+    console.error('Invitation email provider is not configured.')
+    return respondError(response, 503, 'Invitations are temporarily unavailable because email delivery is not configured.')
+  }
+
+  const configuredAppUrl = process.env.APP_URL
+  if (process.env.NODE_ENV === 'production' && !configuredAppUrl) {
+    console.error('APP_URL is required in production for invitation links.')
+    return respondError(response, 503, 'Invitations are temporarily unavailable because the application URL is not configured.')
+  }
+  let appUrl: URL
+  try {
+    appUrl = new URL(configuredAppUrl ?? 'http://localhost:5173')
+  } catch {
+    console.error('APP_URL is invalid.')
+    return respondError(response, 503, 'Invitations are temporarily unavailable because the application URL is invalid.')
+  }
+  if (process.env.NODE_ENV === 'production' && appUrl.protocol !== 'https:') {
+    console.error('APP_URL must use HTTPS in production.')
+    return respondError(response, 503, 'Invitations are temporarily unavailable because the application URL is invalid.')
+  }
+
+  const dailyLimit = Number(process.env.INVITATION_DAILY_LIMIT ?? defaultDailyLimit)
+  if (!Number.isInteger(dailyLimit) || dailyLimit < 1 || dailyLimit > 1000) {
+    console.error('INVITATION_DAILY_LIMIT must be an integer between 1 and 1000.')
+    return respondError(response, 500, 'Invitation could not be created.')
+  }
+
   try {
     const userClient = createClient(supabaseUrl, publishableKey, {
       auth: { autoRefreshToken: false, persistSession: false },
@@ -53,65 +83,53 @@ export default async function handler(request: VercelRequest, response: VercelRe
 
     const { data: membership, error: membershipError } = await userClient
       .from('organization_members')
-      .select('role, organization_id')
+      .select('role')
       .eq('organization_id', body.organizationId)
       .eq('user_id', authData.user.id)
       .maybeSingle()
     if (membershipError) throw membershipError
     if (!membership) return respondError(response, 403, 'You are not a member of that workspace.')
-
-    const callerRole = membership.role as string
-    const allowedInvitationRoles = callerRole === 'admin'
-      ? ['creator', 'manager', 'brand_reviewer', 'legal_reviewer']
-      : callerRole === 'manager'
-        ? ['creator']
-        : []
-    if (!allowedInvitationRoles.includes(role)) {
+    const rolesByCaller: Record<string, string[]> = {
+      admin: ['creator', 'manager', 'brand_reviewer', 'legal_reviewer'],
+      manager: ['creator'],
+    }
+    if (!rolesByCaller[membership.role]?.includes(role)) {
       return respondError(response, 403, 'You are not allowed to invite that role.')
     }
 
     const admin = createClient(supabaseUrl, serviceRoleKey, {
       auth: { autoRefreshToken: false, persistSession: false },
     })
-    const dailyLimit = Number(process.env.INVITATION_DAILY_LIMIT ?? defaultDailyLimit)
-    const now = new Date()
-    const dayStart = new Date(now)
-    dayStart.setUTCHours(0, 0, 0, 0)
-    const { count, error: countError } = await admin.from('workspace_invitations')
-      .select('id', { count: 'exact', head: true })
-      .eq('organization_id', body.organizationId)
-      .gte('created_at', dayStart.toISOString())
-      .lt('created_at', new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString())
-    if (countError) throw countError
-    if (typeof count === 'number' && count >= dailyLimit) {
-      return respondError(response, 429, 'The organization has reached its invitation limit for today.')
-    }
-
     const token = randomBytes(32).toString('base64url')
     const tokenHash = createHash('sha256').update(token, 'utf8').digest('hex')
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
-    const { error: insertError } = await admin.from('workspace_invitations').insert({
-      organization_id: body.organizationId,
-      email,
-      role,
-      token_hash: tokenHash,
-      invited_by: authData.user.id,
-      expires_at: expiresAt,
-      accepted_at: null,
+    const { data, error } = await admin.rpc('assay_create_invitation', {
+      target_org: body.organizationId,
+      target_actor: authData.user.id,
+      target_email: email,
+      target_role: role,
+      target_token_hash: tokenHash,
+      target_expires_at: expiresAt,
+      target_daily_limit: dailyLimit,
     })
-    if (insertError) {
-      if (insertError.code === '23505') {
-        return respondError(response, 409, 'An invitation for that email already exists for this workspace.')
-      }
-      throw insertError
+    if (error) throw error
+
+    const result = data as { status?: string; invitation_id?: string }
+    if (result?.status === 'forbidden') return respondError(response, 403, 'You are not allowed to invite that role.')
+    if (result?.status === 'not_found') return respondError(response, 404, 'Workspace not found.')
+    if (result?.status === 'daily_limit' || result?.status === 'rate_limited') {
+      return respondError(response, 429, 'The invitation limit has been reached. Try again later.')
+    }
+    if (result?.status === 'already_pending') {
+      return respondError(response, 409, 'An invitation for that email is already pending.')
+    }
+    if (result?.status !== 'created' || !result.invitation_id) {
+      throw new Error('Invitation transaction returned an unexpected result.')
     }
 
-    const baseUrl = process.env.APP_URL ?? (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:5173')
-    const inviteLink = `${baseUrl}/accept-invite?token=${encodeURIComponent(token)}`
-
-    const fromAddress = process.env.INVITATION_FROM_EMAIL ?? 'noreply@example.invalid'
-    const apiKey = process.env.RESEND_API_KEY
-    if (apiKey && fromAddress !== 'noreply@example.invalid') {
+    const inviteLink = new URL('/accept-invite', appUrl)
+    inviteLink.searchParams.set('invite', token)
+    try {
       const emailResponse = await fetch('https://api.resend.com/emails', {
         method: 'POST',
         headers: {
@@ -122,24 +140,34 @@ export default async function handler(request: VercelRequest, response: VercelRe
           from: fromAddress,
           to: [email],
           subject: 'You were invited to join Assay',
-          html: `<p>You have been invited to join an Assay workspace.</p><p><a href="${inviteLink}">Accept your invitation</a></p><p>This link expires in 7 days.</p>`,
-          text: `You have been invited to join Assay. Accept your invitation here: ${inviteLink}`,
+          html: `<p>You have been invited to join an Assay workspace.</p><p><a href="${inviteLink.toString()}">Accept your invitation</a></p><p>This link expires in 7 days.</p>`,
+          text: `You have been invited to join Assay. Accept your invitation here: ${inviteLink.toString()}`,
         }),
       })
       if (!emailResponse.ok) {
-        const errorText = await emailResponse.text().catch(() => '')
-        console.error('Invitation email delivery failed:', errorText)
+        console.error('Invitation email delivery failed with HTTP status:', emailResponse.status)
+        const { error: revokeError } = await admin.rpc('assay_revoke_invitation', {
+          target_org: body.organizationId,
+          target_invitation: result.invitation_id,
+        })
+        if (revokeError) console.error('Could not revoke undelivered invitation:', revokeError)
+        return respondError(response, 502, 'The invitation was not delivered. Please try again later.')
       }
-    } else {
-      console.warn('Invitation created without a configured Resend delivery provider; email was not sent.')
+    } catch (error) {
+      console.error('Invitation email delivery request failed:', error)
+      const { error: revokeError } = await admin.rpc('assay_revoke_invitation', {
+        target_org: body.organizationId,
+        target_invitation: result.invitation_id,
+      })
+      if (revokeError) console.error('Could not revoke undelivered invitation:', revokeError)
+      return respondError(response, 502, 'The invitation was not delivered. Please try again later.')
     }
 
-    return response.status(200).json({
+    return response.status(201).json({
       status: 'created',
       organization_id: body.organizationId,
       role,
       expires_at: expiresAt,
-      email,
     })
   } catch (error) {
     console.error('Invitation creation failed:', error)

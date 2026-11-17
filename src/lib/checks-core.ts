@@ -145,10 +145,11 @@ function colorDistance(left: string, right: string) {
 }
 
 export function runImageChecks({
-  asset, approvedPalette = DEFAULT_BRAND_PALETTE,
+  asset, approvedPalette = DEFAULT_BRAND_PALETTE, contrastRatio,
 }: {
   asset: { id: string; filename: string; width: number; height: number; alt_text: string; palette: unknown }
   approvedPalette?: PaletteColor[]
+  contrastRatio?: number
 }): CheckFinding[] {
   const findings: CheckFinding[] = []
   const addFinding = (category: string, title: string, excerpt: string, explanation: string, severity: CheckFinding['severity'], state: CheckFinding['state']) => {
@@ -185,6 +186,16 @@ export function runImageChecks({
       'Check the intended placement; this image may look soft when used in a larger layout.',
       'low',
       'likely',
+    )
+  }
+  if (contrastRatio !== undefined && contrastRatio < 3) {
+    addFinding(
+      'accessibility',
+      'Image tonal contrast may be low',
+      `${contrastRatio.toFixed(2)}:1 estimated contrast`,
+      'A server-side pixel sample found limited tonal separation. This is a coarse image-level estimate, not a text contrast measurement; review any overlaid text in context.',
+      'low',
+      'needs_human_judgement',
     )
   }
 

@@ -37,6 +37,9 @@ export default async function handler(request: VercelRequest, response: VercelRe
     })
     const { data: authData, error: authError } = await userClient.auth.getUser(tokenMatch[1])
     if (authError || !authData.user?.email) return respondError(response, 401, 'Authentication required.')
+    if (!authData.user.email_confirmed_at) {
+      return respondError(response, 403, 'Confirm your email address before accepting this invitation.')
+    }
 
     const admin = createClient(supabaseUrl, serviceRoleKey, {
       auth: { autoRefreshToken: false, persistSession: false },
@@ -46,6 +49,7 @@ export default async function handler(request: VercelRequest, response: VercelRe
       target_token_hash: tokenHash,
       target_user: authData.user.id,
       target_email: authData.user.email,
+      target_email_confirmed: true,
     })
     if (error) throw error
 
