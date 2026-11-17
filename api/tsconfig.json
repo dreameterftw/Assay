@@ -8,5 +8,5 @@
     "module": "ESNext",
     "moduleResolution": "bundler"
   },
-  "include": ["./run-review.ts", "../src/lib/checks-core.ts"]
+  "include": ["./*.ts", "../src/lib/checks-core.ts"]
 }

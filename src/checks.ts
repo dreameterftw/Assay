@@ -9,6 +9,7 @@ export function runDeterministicChecks(content: string, rules: BrandRule[], clai
     rules: rules.map((rule) => ({
       id: rule.id,
       rule_key: rule.ruleKey ?? rule.id,
+      version: rule.version ?? 1,
       category: rule.category.toLowerCase().replace(/ /g, '_'),
       title: rule.label,
       description: rule.description,
@@ -20,6 +21,7 @@ export function runDeterministicChecks(content: string, rules: BrandRule[], clai
     })),
     claims: claims.map((claim) => ({
       id: claim.id,
+      version: claim.version ?? 1,
       statement: claim.statement,
       evidence_label: claim.evidence,
       owner_label: claim.owner,

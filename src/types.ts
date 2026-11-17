@@ -37,6 +37,7 @@ export type Review = {
   ruleSetVersion?: number
   ruleSnapshot?: { rule_id: string; rule_key: string; version: number }[]
   latestRunContentSha256?: string
+  latestRunIsCurrent?: boolean
   waiverReason?: string
   waiverExpiresAt?: string
   image?: { name: string; dataUrl: string; width: number; height: number; altText: string; palette: string[]; assetId?: string; storagePath?: string }
@@ -64,6 +65,7 @@ export type BrandRule = {
 
 export type ApprovedClaim = {
   id: string
+  version?: number
   statement: string
   evidence: string
   evidenceUrl?: string

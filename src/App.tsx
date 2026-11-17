@@ -10,17 +10,28 @@ import { findingKey, runDeterministicChecks } from './checks'
 import { validateSuggestion } from './aiReview'
 import type { Review, BrandRule, ApprovedClaim, Finding, ReviewerRole, ReviewRevision, ReviewDecision } from './types'
 import { checkImageMetadata, inspectImage } from './imageChecks'
+import { DEFAULT_BRAND_PALETTE } from './lib/checks-core'
 import { buildRadar } from './insights'
 import { supabase } from './supabase'
 import { createWorkspace, loadMoreReviews, loadOrCreateWorkspace, loadReviewImage, saveWorkspaceData, type CloudWorkspace, type ReviewCursor } from './cloudWorkspace'
 import type { Session } from '@supabase/supabase-js'
 
-const brandPalette = [{ name: 'Forest', hex: '#285b40' }, { name: 'Sage', hex: '#84a187' }, { name: 'Ivory', hex: '#f4f0e6' }, { name: 'Ink', hex: '#202a22' }]
+const brandPalette = DEFAULT_BRAND_PALETTE
 
 function applyFindingDecisions(findings: Finding[], decisions: ReviewDecision[] = []): Finding[] {
   const latest = new Map<string, ReviewDecision['action']>()
   for (const decision of [...decisions].reverse()) latest.set(decision.findingKey, decision.action)
   return findings.map((finding) => ({ ...finding, decision: latest.get(findingKey(finding)) }))
+}
+
+function imageFindingSourceId(findingKeyValue: string): string | undefined {
+  try {
+    const keyParts = JSON.parse(findingKeyValue) as unknown
+    return Array.isArray(keyParts) && typeof keyParts[0] === 'string' ? keyParts[0] : undefined
+  } catch (error) {
+    if (error instanceof SyntaxError) return undefined
+    throw error
+  }
 }
 
 const navSections = [
@@ -69,10 +80,22 @@ function WorkspaceApp({ initialData, workspace, userEmail, accessToken, syncStat
   const [regressionText, setRegressionText] = useState('')
   const [regressionResults, setRegressionResults] = useState<{ reviewId: string; title: string; added: Finding[] }[] | null>(null)
   const [backupInput, setBackupInput] = useState<HTMLInputElement | null>(null)
+  const [inviteEmail, setInviteEmail] = useState('')
+  const [inviteRole, setInviteRole] = useState<'creator' | 'manager' | 'brand_reviewer' | 'legal_reviewer'>('creator')
+  const [inviteBusy, setInviteBusy] = useState(false)
+  const [inviteMessage, setInviteMessage] = useState('')
+  const [inviteError, setInviteError] = useState('')
+  const [pendingInvites, setPendingInvites] = useState<Array<{ id: string; email: string; role: string; expires_at: string; created_at: string }>>([])
   const [now] = useState(() => new Date())
   const active = reviews.find((review) => review.id === activeId) ?? reviews[0] ?? { id: '', title: '', channel: '', owner: userEmail, initials: userEmail.slice(0, 2).toUpperCase(), time: '', status: 'Draft', findings: [], content: '' }
   const activeHighRisk = active.riskTier === 'High' || active.findings.some((finding) => finding.level === 'Needs review' || /CLAIM|DISCLOSURE/.test(finding.type))
-  const hasCurrentRun = Boolean(activeContentSha256 && active.latestRunContentSha256 === activeContentSha256)
+  const hasCurrentRun = Boolean(activeContentSha256
+    && active.latestRunContentSha256 === activeContentSha256
+    && active.latestRunIsCurrent)
+  const canInviteMembers = ['admin', 'manager'].includes(workspace.role)
+  const inviteRoleOptions = workspace.role === 'admin'
+    ? [{ value: 'creator', label: 'Creator' }, { value: 'manager', label: 'Manager' }, { value: 'brand_reviewer', label: 'Brand reviewer' }, { value: 'legal_reviewer', label: 'Legal reviewer' }]
+    : [{ value: 'creator', label: 'Creator' }]
   const eligibleReviewers = workspace.members.filter((member) => member.userId !== workspace.currentUserId && member.role !== 'Creator' && (!activeHighRisk || ['Legal reviewer', 'Admin'].includes(member.role)))
   const canApproveActive = canReviewWorkflow && active.createdById !== workspace.currentUserId
     && ['Needs review', 'In review'].includes(active.status)
@@ -129,15 +152,16 @@ function WorkspaceApp({ initialData, workspace, userEmail, accessToken, syncStat
 
   async function refreshReviewHistory(reviewId: string): Promise<boolean> {
     if (!supabase) return false
-    const [findingsResult, commentsResult, eventsResult, revisionsResult, decisionsResult, runsResult] = await Promise.all([
+    const [findingsResult, commentsResult, eventsResult, revisionsResult, decisionsResult, runsResult, currentRunResult] = await Promise.all([
       supabase.from('review_findings').select('*').eq('organization_id', workspace.id).eq('review_id', reviewId).order('created_at'),
       supabase.from('review_comments').select('*').eq('organization_id', workspace.id).eq('review_id', reviewId).order('created_at'),
       supabase.from('review_events').select('*').eq('organization_id', workspace.id).eq('review_id', reviewId).order('created_at', { ascending: false }),
       supabase.from('review_revisions').select('*').eq('organization_id', workspace.id).eq('review_id', reviewId).order('created_at', { ascending: false }),
       supabase.from('review_decisions').select('*').eq('organization_id', workspace.id).eq('review_id', reviewId).order('created_at', { ascending: false }),
       supabase.from('review_runs').select('content_sha256').eq('organization_id', workspace.id).eq('review_id', reviewId).order('created_at', { ascending: false }).limit(1),
+      supabase.rpc('assay_review_has_current_run', { target_review: reviewId }),
     ])
-    const queryError = [findingsResult.error, commentsResult.error, eventsResult.error, revisionsResult.error, decisionsResult.error, runsResult.error].find(Boolean)
+    const queryError = [findingsResult.error, commentsResult.error, eventsResult.error, revisionsResult.error, decisionsResult.error, runsResult.error, currentRunResult.error].find(Boolean)
     if (queryError) {
       console.error('Could not refresh review details:', queryError)
       setNotice('Could not refresh this review. Try again.')
@@ -160,7 +184,8 @@ function WorkspaceApp({ initialData, workspace, userEmail, accessToken, syncStat
         type: `${row.category.replace(/_/g, ' ').toUpperCase()} · ${row.severity.toUpperCase()}`,
         title: row.title, excerpt: row.excerpt,
         source: rule ? `${rule.id} · ${rule.label}` : claim ? `${claim.id} · ${claim.evidence}` : 'Review evidence',
-        note: row.explanation, sourceId: row.rule_id ?? row.claim_id ?? undefined,
+        note: row.explanation,
+        sourceId: row.rule_id ?? row.claim_id ?? (row.source_kind === 'image_check' ? imageFindingSourceId(row.finding_key) : undefined),
         origin: row.source_kind === 'ai_judgment' ? 'ai' : row.source_kind === 'image_check' ? 'image' : 'deterministic',
         confidence: row.confidence == null ? undefined : Number(row.confidence),
       }
@@ -183,6 +208,7 @@ function WorkspaceApp({ initialData, workspace, userEmail, accessToken, syncStat
       decisions,
       findings: findings.map((finding) => ({ ...finding, decision: decisionByKey.get(findingKey(finding)) })),
       latestRunContentSha256: runsResult.data?.[0]?.content_sha256,
+      latestRunIsCurrent: currentRunResult.data === true,
     })))
     return true
   }
@@ -200,6 +226,77 @@ function WorkspaceApp({ initialData, workspace, userEmail, accessToken, syncStat
     })
     return () => { activeEffect = false }
   }, [active.id, workspace.id])
+
+  useEffect(() => {
+    const client = supabase
+    if (!client || !workspace) return
+    let alive = true
+    const loadPendingInvites = async () => {
+      const { data, error } = await client.from('workspace_invitations')
+        .select('id, email, role, expires_at, created_at')
+        .eq('organization_id', workspace.id)
+        .is('accepted_at', null)
+        .order('created_at', { ascending: false })
+      if (!alive) return
+      if (error) {
+        setInviteError(error.message)
+        return
+      }
+      setPendingInvites((data ?? []) as Array<{ id: string; email: string; role: string; expires_at: string; created_at: string }>)
+    }
+    void loadPendingInvites()
+    return () => { alive = false }
+  }, [supabase, workspace?.id])
+
+  async function createMemberInvite() {
+    const client = supabase
+    if (!client || !workspace || !canInviteMembers) return
+    const email = inviteEmail.trim().toLowerCase()
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      setInviteError('Enter a valid email address.')
+      return
+    }
+    setInviteBusy(true)
+    setInviteError('')
+    setInviteMessage('')
+    try {
+      const response = await fetch('/api/create-invite', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ organizationId: workspace.id, email, role: inviteRole }),
+      })
+      const payload = await response.json().catch(() => ({})) as { error?: string; status?: string }
+      if (!response.ok) throw new Error(payload.error || 'Invitation could not be created.')
+      setInviteEmail('')
+      setInviteRole('creator')
+      setInviteMessage('Invitation created. The link is sent to the workspace member by email when the provider is configured.')
+      const { data, error } = await client.from('workspace_invitations')
+        .select('id, email, role, expires_at, created_at')
+        .eq('organization_id', workspace.id)
+        .is('accepted_at', null)
+        .order('created_at', { ascending: false })
+      if (!error) setPendingInvites((data ?? []) as Array<{ id: string; email: string; role: string; expires_at: string; created_at: string }>)
+    } catch (caught) {
+      setInviteError(caught instanceof Error ? caught.message : 'Invitation could not be created.')
+    } finally {
+      setInviteBusy(false)
+    }
+  }
+
+  async function revokeInvite(inviteId: string) {
+    if (!supabase || !workspace) return
+    try {
+      const { error } = await supabase.from('workspace_invitations').delete().eq('id', inviteId).eq('organization_id', workspace.id)
+      if (error) throw error
+      setPendingInvites((current) => current.filter((invitation) => invitation.id !== inviteId))
+      setInviteMessage('Invitation revoked.')
+    } catch (caught) {
+      setInviteError(caught instanceof Error ? caught.message : 'Invitation could not be revoked.')
+    }
+  }
 
   function updateReview(reviewId: string, updater: (review: Review) => Review) {
     setReviews((current) => {
@@ -657,7 +754,7 @@ function WorkspaceApp({ initialData, workspace, userEmail, accessToken, syncStat
             <Metric label="Rules to clarify" value={String(radar.ambiguous.length)} detail="Repeated finding prompts" icon={<Sparkles size={16} />} tone="violet" />
           </section>
 
-          {activeNav === 'Settings' ? <section className="brandbrain-section"><div className="section-heading"><div><h2>Workspace settings</h2><p>Manage your signed-in’s workspace and backup files.</p></div></div><div className="brain-card backup-card"><div className="brain-card-head"><div><span className="brain-overline">WORKSPACE DATA</span><h3>Backup and restore</h3></div><span className="local-data-badge"><ShieldCheck size={13} /> Synced workspace</span></div><p>Assay stores supported reviews, rules, and claims in this authenticated workspace. A downloaded backup is a separate JSON file.</p><div className="backup-actions"><button className="primary-button" onClick={exportWorkspaceBackup}><Download size={14} /> Download workspace backup</button><button className="secondary-button" onClick={() => backupInput?.click()}><FileText size={14} /> Import backup</button><input ref={setBackupInput} type="file" accept="application/json,.json" hidden onChange={(event) => { void restoreWorkspaceBackup(event.target.files?.[0]); event.currentTarget.value = '' }} /></div><div className="backup-note"><ShieldCheck size={14} /> Backups can contain submitted copy, review history, and attached image data. Store them with the same care as the workspace.</div><div className="backup-limit">Imports add core review, rule, and claim records. Images, comments, decisions, and revision history are not imported.</div></div></section> : activeNav === 'Brand Brain' ? <section className="brandbrain-section"><div className="section-heading"><div><h2>Brand Brain <span className="muted-count">{rules.filter((rule) => rule.status === 'Approved').length} approved rules</span></h2><p>Your team’s source of truth. Draft rules stay out of checks until approved.</p></div>{(canManageBrandBrain || canManageClaims) && <div className="brandbrain-actions">{canManageClaims && <button className="secondary-button" onClick={() => setShowClaimForm((shown) => !shown)}><Plus size={14} /> Add approved claim</button>}{canManageBrandBrain && <button className="primary-button" onClick={() => setShowRuleForm((shown) => !shown)}><Plus size={15} /> Add rule</button>}</div>}</div>
+          {activeNav === 'Settings' ? <section className="brandbrain-section"><div className="section-heading"><div><h2>Workspace settings</h2><p>Manage your signed-in’s workspace and backup files.</p></div></div><div className="brain-card backup-card"><div className="brain-card-head"><div><span className="brain-overline">WORKSPACE DATA</span><h3>Backup and restore</h3></div><span className="local-data-badge"><ShieldCheck size={13} /> Synced workspace</span></div><p>Assay stores supported reviews, rules, and claims in this authenticated workspace. A downloaded backup is a separate JSON file.</p><div className="backup-actions"><button className="primary-button" onClick={exportWorkspaceBackup}><Download size={14} /> Download workspace backup</button><button className="secondary-button" onClick={() => backupInput?.click()}><FileText size={14} /> Import backup</button><input ref={setBackupInput} type="file" accept="application/json,.json" hidden onChange={(event) => { void restoreWorkspaceBackup(event.target.files?.[0]); event.currentTarget.value = '' }} /></div><div className="backup-note"><ShieldCheck size={14} /> Backups can contain submitted copy, review history, and attached image data. Store them with the same care as the workspace.</div><div className="backup-limit">Imports add core review, rule, and claim records. Images, comments, decisions, and revision history are not imported.</div></div>{canInviteMembers && <div className="brain-card backup-card"><div className="brain-card-head"><div><span className="brain-overline">MEMBERS</span><h3>Invite workspace members</h3></div></div><div className="invite-form"><input type="email" value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} placeholder="name@example.com" /><select value={inviteRole} onChange={(event) => setInviteRole(event.target.value as 'creator' | 'manager' | 'brand_reviewer' | 'legal_reviewer')}><option value="creator">Creator</option>{workspace.role === 'admin' && <><option value="manager">Manager</option><option value="brand_reviewer">Brand reviewer</option><option value="legal_reviewer">Legal reviewer</option></>}</select><button className="primary-button" disabled={inviteBusy} onClick={() => { void createMemberInvite() }}>{inviteBusy ? 'Sending…' : 'Send invite'}</button></div>{inviteError && <p className="auth-error" role="alert">{inviteError}</p>}{inviteMessage && <p className="auth-message" role="status">{inviteMessage}</p>}<div className="invite-list"><div className="brain-card-head"><div><span className="brain-overline">PENDING</span><h3>Open invitations</h3></div></div>{pendingInvites.length === 0 ? <p className="empty-history">No open invitations.</p> : pendingInvites.map((invitation) => <div className="claim-row" key={invitation.id}><div className="claim-row-top"><strong>{invitation.email}</strong><span className="claim-status current">{invitation.role}</span></div><div className="claim-meta"><span>Expires {new Date(invitation.expires_at).toLocaleDateString()}</span><button className="dismiss-button" onClick={() => { void revokeInvite(invitation.id) }}>Revoke</button></div></div>)}</div></div>}{!canInviteMembers && <div className="brain-card backup-card"><div className="brain-card-head"><div><span className="brain-overline">MEMBERS</span><h3>Invitation access</h3></div></div><p>Only Admins can invite non-creator roles. Managers can invite creators only.</p></div>}</section> : activeNav === 'Brand Brain' ? <section className="brandbrain-section"><div className="section-heading"><div><h2>Brand Brain <span className="muted-count">{rules.filter((rule) => rule.status === 'Approved').length} approved rules</span></h2><p>Your team’s source of truth. Draft rules stay out of checks until approved.</p></div>{(canManageBrandBrain || canManageClaims) && <div className="brandbrain-actions">{canManageClaims && <button className="secondary-button" onClick={() => setShowClaimForm((shown) => !shown)}><Plus size={14} /> Add approved claim</button>}{canManageBrandBrain && <button className="primary-button" onClick={() => setShowRuleForm((shown) => !shown)}><Plus size={15} /> Add rule</button>}</div>}</div>
             <div className="regression-panel"><div><span className="brain-overline">RULE REGRESSION PREVIEW</span><h3>Check a proposed term against saved reviews</h3><p>Preview a simple phrase match locally before adding it. This does not change the rule set.</p></div><div className="regression-form"><input aria-label="Phrase to preview" placeholder="Enter a phrase, such as ‘clinically proven’" value={regressionText} onChange={(event) => { setRegressionText(event.target.value); setRegressionResults(null) }} onKeyDown={(event) => { if (event.key === 'Enter' && regressionText.trim()) previewRuleRegression() }} /><button className="secondary-button" disabled={!regressionText.trim()} onClick={previewRuleRegression}><Search size={14} /> Preview impact</button></div>{regressionResults && <div className="regression-results" aria-live="polite"><strong>{regressionResults.reduce((sum, item) => sum + item.added.length, 0)} new match{regressionResults.reduce((sum, item) => sum + item.added.length, 0) === 1 ? '' : 'es'} across {regressionResults.length} review{regressionResults.length === 1 ? '' : 's'}</strong>{regressionResults.length ? regressionResults.map((item) => <div className="regression-result" key={item.reviewId}><span>{item.title}</span><small>{item.added.map((finding) => `“${finding.excerpt}”`).join(', ')}</small></div>) : <p>No matches in saved review copy.</p>}<small>Preview uses the current local review set and only the basic phrase matcher. It is not a full rule quality evaluation.</small></div>}</div>
             <div className="brandbrain-content"><div className="brain-card"><div className="brain-card-head"><div><span className="brain-overline">GOVERNANCE RULES</span><h3>Brand rules</h3></div><span className="version-pill">Rule set v1.0</span></div>{showRuleForm && <div className="inline-create"><input autoFocus placeholder="e.g. Avoid urgency language in customer emails" value={ruleText} onChange={(event) => setRuleText(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') addRule() }} /><button onClick={addRule}>Save draft</button><button className="cancel-create" onClick={() => setShowRuleForm(false)}>Cancel</button></div>}<div className="rule-list">{rules.map((rule) => <div className={`rule-row ${!rule.active ? 'inactive-row' : ''}`} key={rule.id}><span className={`rule-severity ${rule.severity.toLowerCase()}`} /><div className="rule-copy"><div className="rule-title-line"><strong>{rule.label}</strong><span className={`rule-status ${rule.status.toLowerCase()}`}>{rule.status}{rule.version ? ` · v${rule.version}` : ''}</span></div><p>{rule.description}</p><span className="rule-source"><BookOpen size={12} />{rule.ruleKey ?? rule.id} · {rule.source}</span></div><div className="rule-controls">{canManageBrandBrain && (rule.status === 'Draft' ? <button className="approve-rule" onClick={() => approveRule(rule.id)}><Check size={13} /> Publish version</button> : rule.status === 'Approved' ? <button className={`toggle-switch ${rule.active ? 'on' : ''}`} onClick={() => toggleRule(rule.id)} aria-label={rule.active ? 'Deactivate rule' : 'Activate rule'}><span /></button> : null)}</div></div>)}</div><div className="brain-footer"><ShieldCheck size={14} /> Only approved and active rules are used by deterministic checks.</div></div>
               <div className="brain-card claims-card"><div className="brain-card-head"><div><span className="brain-overline">APPROVED EVIDENCE</span><h3>Claims Vault</h3></div><span className="claim-count">{claims.filter((claim) => claim.active).length} claims</span></div>{showClaimForm && <div className="claim-create"><input autoFocus placeholder="Approved claim or fact" value={claimText} onChange={(event) => setClaimText(event.target.value)} /><input placeholder="Evidence summary or source" value={claimEvidence} onChange={(event) => setClaimEvidence(event.target.value)} /><input type="url" placeholder="Evidence URL (optional)" value={claimEvidenceUrl} onChange={(event) => setClaimEvidenceUrl(event.target.value)} /><label>Expires<input type="date" value={claimExpiry} onChange={(event) => setClaimExpiry(event.target.value)} /></label><button onClick={addClaim} disabled={!claimText.trim() || !claimEvidence.trim() || !claimExpiry}>Save</button><button className="cancel-create" onClick={() => setShowClaimForm(false)}>Cancel</button></div>}<div className="claim-list">{claims.map((claim) => { const expired = Boolean(claim.expiryDate) && claim.expiryDate < today; return <div className={`claim-row ${!claim.active ? 'inactive-row' : ''}`} key={claim.id}><div className="claim-row-top"><strong>{claim.statement}</strong><span className={`claim-status ${expired ? 'expired' : 'current'}`}>{expired ? 'Expired' : 'Current'}</span></div><div className="claim-evidence"><BookOpen size={12} />{claim.evidence}{claim.evidenceUrl && <> · <a href={claim.evidenceUrl} target="_blank" rel="noreferrer">Open proof</a></>}</div><div className="claim-meta"><span>Owner · {claim.owner}</span><span>Expires · {claim.expiryDate ? new Date(`${claim.expiryDate}T00:00:00`).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : 'Not set'}</span></div>{canManageClaims && <button className={`claim-toggle ${claim.active ? '' : 'restore'}`} onClick={() => toggleClaim(claim.id)}>{claim.active ? 'Archive' : 'Restore'}</button>}</div> })}</div><div className="brain-footer"><Clock3 size={14} /> Expired claims remain visible and are flagged when matched.</div></div>
@@ -707,8 +804,13 @@ function App() {
   const [workspaceLoading, setWorkspaceLoading] = useState(false)
   const [workspaceAttempt, setWorkspaceAttempt] = useState(0)
   const [workspaceError, setWorkspaceError] = useState('')
+  const [inviteAttempt, setInviteAttempt] = useState(0)
+  const [inviteComplete, setInviteComplete] = useState(false)
+  const [inviteBusy, setInviteBusy] = useState(false)
+  const [inviteError, setInviteError] = useState('')
   const [syncStatus, setSyncStatus] = useState<'saved' | 'saving' | 'error'>('saved')
   const saveQueue = useRef<Promise<void>>(Promise.resolve())
+  const inviteToken = new URLSearchParams(window.location.search).get('invite')
 
   useEffect(() => {
     clearLegacyWorkspaceMirror()
@@ -730,7 +832,11 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!session || !supabase) { setWorkspace(null); return }
+    if (!session || !supabase || (inviteToken && !inviteComplete)) {
+      setWorkspace(null)
+      setWorkspaceLoading(false)
+      return
+    }
     let alive = true
     setWorkspaceLoading(true)
     loadOrCreateWorkspace(session.user, selectedOrganizationId).then((loaded) => {
@@ -742,7 +848,37 @@ function App() {
       if (alive) setWorkspaceError(error instanceof Error ? error.message : 'Could not load your workspace.')
     }).finally(() => { if (alive) setWorkspaceLoading(false) })
     return () => { alive = false }
-  }, [session?.user.id, selectedOrganizationId, workspaceAttempt])
+  }, [session?.user.id, selectedOrganizationId, workspaceAttempt, inviteToken, inviteComplete])
+
+  useEffect(() => {
+    if (!session || !supabase || !inviteToken || inviteComplete) return
+    let alive = true
+    setInviteBusy(true)
+    setInviteError('')
+    fetch('/api/accept-invite', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${session.access_token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ inviteToken }),
+    }).then(async (response) => {
+      const result = await response.json() as { organization_id?: string; error?: string }
+      if (!response.ok || !result.organization_id) throw new Error(result.error || 'Invitation could not be accepted.')
+      if (!alive) return
+      window.history.replaceState(null, '', `${window.location.pathname}${window.location.hash}`)
+      setInviteComplete(true)
+      setSelectedOrganizationId(result.organization_id)
+      setWorkspace(null)
+      setWorkspaceError('')
+      setWorkspaceAttempt((attempt) => attempt + 1)
+    }).catch((error: unknown) => {
+      if (alive) setInviteError(error instanceof Error ? error.message : 'Invitation could not be accepted.')
+    }).finally(() => {
+      if (alive) setInviteBusy(false)
+    })
+    return () => { alive = false }
+  }, [session?.user.id, inviteToken, inviteAttempt, inviteComplete])
 
   function persistCloudData(data: AssayData): Promise<void> {
     if (!workspace || !session) return Promise.reject(new Error('Workspace is not ready.'))
@@ -766,7 +902,11 @@ function App() {
 
   if (!supabase) return <SetupRequired />
   if (!authReady) return <StartupScreen message="Checking your sign-in…" />
-  if (!session) return <AuthScreen />
+  if (!session) return <AuthScreen invitationPending={Boolean(inviteToken)} />
+  if (inviteToken && !inviteComplete) {
+    if (inviteError) return <InvitationError message={inviteError} onRetry={() => setInviteAttempt((attempt) => attempt + 1)} onSignOut={signOut} />
+    return <StartupScreen message={inviteBusy ? 'Accepting your workspace invitation…' : 'Preparing your invitation…'} />
+  }
   if (workspaceError && !workspace) return <StartupError message={workspaceError} onRetry={() => setWorkspaceAttempt((attempt) => attempt + 1)} onSignOut={signOut} />
   if (workspaceLoading) return <StartupScreen message="Loading your private workspace…" />
   if (!workspace) return <WorkspaceCreationScreen userId={session.user.id} onCreated={(organizationId) => { setSelectedOrganizationId(organizationId); setWorkspaceAttempt((attempt) => attempt + 1) }} />
@@ -777,7 +917,7 @@ function SetupRequired() {
   return <main className="auth-shell"><section className="auth-card"><div className="auth-brand"><span className="brand-mark">A</span><strong>assay<span className="brand-period">.</span></strong></div><span className="brain-overline">DEPLOYMENT SETUP REQUIRED</span><h1>Connect your workspace database</h1><p>Assay is configured for authenticated Supabase workspaces. Add the project URL and publishable key to Vercel’s environment settings, then redeploy.</p><div className="env-instructions"><code>VITE_SUPABASE_URL</code><code>VITE_SUPABASE_PUBLISHABLE_KEY</code></div><small>The publishable key is designed for browser use. Never add a service-role or secret key to a VITE_ variable.</small></section></main>
 }
 
-function AuthScreen() {
+function AuthScreen({ invitationPending = false }: { invitationPending?: boolean }) {
   const [signUp, setSignUp] = useState(false)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -791,7 +931,11 @@ function AuthScreen() {
     setBusy(true); setError(''); setMessage('')
     try {
       if (signUp) {
-        const { data, error: authError } = await supabase.auth.signUp({ email: email.trim(), password })
+        const { data, error: authError } = await supabase.auth.signUp({
+          email: email.trim(),
+          password,
+          options: invitationPending ? { emailRedirectTo: window.location.href } : undefined,
+        })
         if (authError) throw authError
         if (!data.session) setMessage('Check your email for a confirmation link, then return here to sign in.')
       } else {
@@ -803,7 +947,7 @@ function AuthScreen() {
     } finally { setBusy(false) }
   }
 
-  return <main className="auth-shell"><section className="auth-card"><div className="auth-brand"><span className="brand-mark">A</span><strong>assay<span className="brand-period">.</span></strong></div><span className="brain-overline">PRIVATE BRAND WORKSPACE</span><h1>{signUp ? 'Create your account' : 'Sign in to Assay'}</h1><p>Reviews and brand rules are stored in your authenticated workspace.</p><form onSubmit={submit}><label>Email<input type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} /></label><label>Password<input type="password" autoComplete={signUp ? 'new-password' : 'current-password'} minLength={8} required value={password} onChange={(event) => setPassword(event.target.value)} /></label><button className="primary-button" disabled={busy}>{busy ? 'Please wait…' : signUp ? 'Create account' : 'Sign in'}</button></form>{error && <p className="auth-error" role="alert">{error}</p>}{message && <p className="auth-message" role="status">{message}</p>}<button className="auth-toggle" onClick={() => { setSignUp((value) => !value); setError(''); setMessage('') }}>{signUp ? 'Already registered? Sign in' : 'New to Assay? Create an account'}</button><small>New accounts may need email confirmation, depending on the Supabase Auth settings.</small></section></main>
+  return <main className="auth-shell"><section className="auth-card"><div className="auth-brand"><span className="brand-mark">A</span><strong>assay<span className="brand-period">.</span></strong></div><span className="brain-overline">PRIVATE BRAND WORKSPACE</span><h1>{signUp ? 'Create your account' : invitationPending ? 'Accept your invitation' : 'Sign in to Assay'}</h1><p>{invitationPending ? 'Sign in or create an account with the email address that received this invitation.' : 'Reviews and brand rules are stored in your authenticated workspace.'}</p><form onSubmit={submit}><label>Email<input type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} /></label><label>Password<input type="password" autoComplete={signUp ? 'new-password' : 'current-password'} minLength={8} required value={password} onChange={(event) => setPassword(event.target.value)} /></label><button className="primary-button" disabled={busy}>{busy ? 'Please wait…' : signUp ? 'Create account' : 'Sign in'}</button></form>{error && <p className="auth-error" role="alert">{error}</p>}{message && <p className="auth-message" role="status">{message}</p>}<button className="auth-toggle" onClick={() => { setSignUp((value) => !value); setError(''); setMessage('') }}>{signUp ? 'Already registered? Sign in' : 'New to Assay? Create an account'}</button><small>New accounts may need email confirmation, depending on the Supabase Auth settings.</small></section></main>
 }
 
 function StartupScreen({ message }: { message: string }) {
@@ -831,6 +975,10 @@ function WorkspaceCreationScreen({ userId, onCreated }: { userId: string; onCrea
 
 function StartupError({ message, onRetry, onSignOut }: { message: string; onRetry: () => void; onSignOut: () => void }) {
   return <main className="auth-shell"><section className="auth-card"><div className="auth-brand"><span className="brand-mark">A</span><strong>assay<span className="brand-period">.</span></strong></div><h1>Workspace unavailable</h1><p className="auth-error">{message}</p><button className="primary-button" onClick={onRetry}>Try again</button><button className="auth-toggle" onClick={onSignOut}>Sign out</button></section></main>
+}
+
+function InvitationError({ message, onRetry, onSignOut }: { message: string; onRetry: () => void; onSignOut: () => void }) {
+  return <main className="auth-shell"><section className="auth-card"><div className="auth-brand"><span className="brand-mark">A</span><strong>assay<span className="brand-period">.</span></strong></div><span className="brain-overline">WORKSPACE INVITATION</span><h1>Invitation unavailable</h1><p className="auth-error" role="alert">{message}</p><p>Check that you signed in with the invited email address, or ask a workspace admin for a new invitation.</p><button className="primary-button" onClick={onRetry}>Try again</button><button className="auth-toggle" onClick={onSignOut}>Sign out</button></section></main>
 }
 
 function Metric({ label, value, detail, icon, tone }: { label: string; value: string; detail: React.ReactNode; icon: React.ReactNode; tone: string }) {

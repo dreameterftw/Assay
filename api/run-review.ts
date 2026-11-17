@@ -1,12 +1,91 @@
 import { createHash } from 'node:crypto'
 import type { VercelRequest, VercelResponse } from '@vercel/node'
-import { createClient } from '@supabase/supabase-js'
-import { ENGINE_VERSION, runChecks, type CheckClaim, type CheckRule } from '../src/lib/checks-core'
+import { createClient, type SupabaseClient } from '@supabase/supabase-js'
+import {
+  DEFAULT_BRAND_PALETTE,
+  ENGINE_VERSION,
+  runChecks,
+  runImageChecks,
+  type CheckClaim,
+  type CheckRule,
+} from '../src/lib/checks-core.js'
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const pageSize = 500
+
+type ReviewRunInputs = {
+  review_id: string
+  organization_id: string
+  content: string
+  status: string
+  archived_at: string | null
+  rule_set_version: number
+  content_sha256: string
+  assets_sha256: string
+  input_sha256: string
+  assets: ReviewAssetSnapshot[]
+}
+
+type ReviewAssetSnapshot = {
+  id: string
+  filename: string
+  width: number
+  height: number
+  alt_text: string
+  palette: unknown
+}
+
+type Finding = ReturnType<typeof runChecks>[number]
+type AdminClient = SupabaseClient<any, 'public', 'public'>
 
 function respondError(response: VercelResponse, status: number, message: string) {
   return response.status(status).json({ error: message })
+}
+
+function sha256(value: string) {
+  return createHash('sha256').update(value, 'utf8').digest('hex')
+}
+
+function hashSnapshotText(values: Array<string | number | boolean | null>) {
+  return sha256(JSON.stringify(values))
+}
+
+async function loadRules(admin: AdminClient, organizationId: string): Promise<CheckRule[]> {
+  const rows: CheckRule[] = []
+  let expectedCount: number | null = null
+  for (let offset = 0; expectedCount === null || offset < expectedCount; offset += pageSize) {
+    const { data, count, error } = await admin.from('brand_rules')
+      .select('id,rule_key,version,category,title,description,source_label,severity,match_text,active,status', { count: 'exact' })
+      .eq('organization_id', organizationId).eq('status', 'approved').eq('active', true)
+      .order('id').range(offset, offset + pageSize - 1)
+    if (error) throw error
+    if (count === null) throw new Error('Approved rule count was unavailable.')
+    if (expectedCount !== null && count !== expectedCount) throw new Error('Approved rules changed while loading.')
+    expectedCount = count
+    rows.push(...(data ?? []) as CheckRule[])
+    if (offset >= expectedCount || !data?.length) break
+  }
+  if (rows.length !== expectedCount) throw new Error('Approved rule count did not match the loaded rows.')
+  return rows
+}
+
+async function loadClaims(admin: AdminClient, organizationId: string): Promise<CheckClaim[]> {
+  const rows: CheckClaim[] = []
+  let expectedCount: number | null = null
+  for (let offset = 0; expectedCount === null || offset < expectedCount; offset += pageSize) {
+    const { data, count, error } = await admin.from('approved_claims')
+      .select('id,version,statement,value,evidence_label,evidence_url,owner_label,reviewed_at,expires_at,active', { count: 'exact' })
+      .eq('organization_id', organizationId).eq('active', true)
+      .order('id').range(offset, offset + pageSize - 1)
+    if (error) throw error
+    if (count === null) throw new Error('Active claim count was unavailable.')
+    if (expectedCount !== null && count !== expectedCount) throw new Error('Active claims changed while loading.')
+    expectedCount = count
+    rows.push(...(data ?? []) as CheckClaim[])
+    if (offset >= expectedCount || !data?.length) break
+  }
+  if (rows.length !== expectedCount) throw new Error('Active claim count did not match the loaded rows.')
+  return rows
 }
 
 export default async function handler(request: VercelRequest, response: VercelResponse) {
@@ -40,91 +119,98 @@ export default async function handler(request: VercelRequest, response: VercelRe
     if (authError || !authData.user) return respondError(response, 401, 'Authentication required.')
 
     const { data: review, error: reviewError } = await userClient.from('reviews')
-      .select('id, organization_id, content, status, archived_at, rule_set_version')
+      .select('id,organization_id,status,archived_at')
       .eq('id', body.reviewId).maybeSingle()
     if (reviewError) throw reviewError
     if (!review) return respondError(response, 404, 'Review not found.')
-    if (review.archived_at || ['approved', 'waived'].includes(review.status)) {
+    if (review.archived_at || !['draft', 'changes_requested'].includes(review.status)) {
       return respondError(response, 409, 'This review cannot be checked.')
     }
 
     const admin = createClient(supabaseUrl, serviceRoleKey, {
       auth: { autoRefreshToken: false, persistSession: false },
     })
-    const { data: allowed, error: rateLimitError } = await admin.rpc('assay_claim_review_run_slot', {
+    const { data: inputs, error: inputsError } = await admin.rpc('assay_review_run_inputs', {
       target_review: review.id,
     })
-    if (rateLimitError) throw rateLimitError
-    if (!allowed) return respondError(response, 429, 'Please wait before running this check again.')
+    if (inputsError) throw inputsError
+    const runInputs = inputs as ReviewRunInputs | null
+    if (!runInputs) return respondError(response, 404, 'Review not found.')
+    if (runInputs.organization_id !== review.organization_id) {
+      throw new Error('The review organization changed while loading check inputs.')
+    }
+    if (runInputs.archived_at || !['draft', 'changes_requested'].includes(runInputs.status)) {
+      return respondError(response, 409, 'This review cannot be checked.')
+    }
 
-    const [rulesResult, claimsResult] = await Promise.all([
-      admin.from('brand_rules').select('id,rule_key,category,title,description,source_label,severity,match_text,active,status')
-        .eq('organization_id', review.organization_id).eq('status', 'approved').eq('active', true),
-      admin.from('approved_claims').select('id,statement,evidence_label,owner_label,expires_at,active')
-        .eq('organization_id', review.organization_id).eq('active', true),
+    const [rules, claims] = await Promise.all([
+      loadRules(admin, runInputs.organization_id),
+      loadClaims(admin, runInputs.organization_id),
     ])
-    if (rulesResult.error) throw rulesResult.error
-    if (claimsResult.error) throw claimsResult.error
-
-    const rules = rulesResult.data as CheckRule[]
-    const claims = claimsResult.data as CheckClaim[]
-    const findings = runChecks({ content: review.content, rules, claims, today: new Date().toISOString().slice(0, 10) })
-    const contentSha256 = createHash('sha256').update(review.content, 'utf8').digest('hex')
-    const ruleSnapshot = rules.map(({ id, rule_key, category }) => ({ rule_id: id, rule_key, category }))
-    const claimSnapshot = claims.map(({ id, statement, evidence_label, expires_at }) => ({ claim_id: id, statement, evidence_label, expires_at }))
-
-    const findingRows = findings.map((finding) => ({
-      organization_id: review.organization_id,
-      review_id: review.id,
-      ...finding,
+    const today = new Date().toISOString().slice(0, 10)
+    const findings: Finding[] = [
+      ...runChecks({ content: runInputs.content, rules, claims, today }),
+      ...runInputs.assets.flatMap((asset) => runImageChecks({ asset, approvedPalette: DEFAULT_BRAND_PALETTE })),
+    ]
+    const ruleSnapshot = rules.map((rule) => ({
+      id: rule.id,
+      rule_key: rule.rule_key,
+      version: rule.version,
+      category: rule.category,
+      status: rule.status,
+      active: rule.active,
+      title: rule.title,
+      description: rule.description,
+      source_label: rule.source_label,
+      severity: rule.severity,
+      match_text: rule.match_text,
+      text_sha256: hashSnapshotText([rule.title, rule.description, rule.source_label, rule.match_text]),
     }))
-    if (findingRows.length) {
-      const { error } = await admin.from('review_findings').upsert(findingRows, {
-        onConflict: 'organization_id,review_id,finding_key',
-      })
-      if (error) throw error
-    }
+    const claimSnapshot = claims.map((claim) => ({
+      id: claim.id,
+      version: claim.version,
+      statement: claim.statement,
+      value: claim.value ?? null,
+      evidence_label: claim.evidence_label,
+      evidence_url: claim.evidence_url ?? null,
+      owner_label: claim.owner_label,
+      reviewed_at: claim.reviewed_at ?? null,
+      expires_at: claim.expires_at,
+      active: claim.active,
+      text_sha256: hashSnapshotText([
+        claim.statement, claim.value ?? null, claim.evidence_label, claim.evidence_url ?? null,
+        claim.owner_label, claim.reviewed_at ?? null, claim.expires_at, claim.active,
+      ]),
+    }))
 
-    const { data: previousFindings, error: previousError } = await admin.from('review_findings')
-      .select('id,finding_key').eq('organization_id', review.organization_id).eq('review_id', review.id)
-      .in('source_kind', ['rule', 'claim'])
-    if (previousError) throw previousError
-    const currentKeys = new Set(findings.map((finding) => finding.finding_key))
-    const staleIds = (previousFindings ?? []).filter((finding) => !currentKeys.has(finding.finding_key)).map((finding) => finding.id)
-    if (staleIds.length) {
-      const { error } = await admin.from('review_findings').delete()
-        .eq('organization_id', review.organization_id).eq('review_id', review.id).in('id', staleIds)
-      if (error) throw error
-    }
+    const { data: commitResult, error: commitError } = await admin.rpc('assay_commit_review_run', {
+      target_review: review.id,
+      target_user: authData.user.id,
+      expected_content_sha256: runInputs.content_sha256,
+      expected_assets_sha256: runInputs.assets_sha256,
+      expected_input_sha256: runInputs.input_sha256,
+      target_findings: findings,
+      target_rule_snapshot: ruleSnapshot,
+      target_claim_snapshot: claimSnapshot,
+      target_asset_snapshot: runInputs.assets,
+      target_engine_version: ENGINE_VERSION,
+    })
+    if (commitError) throw commitError
 
-    if (findings.some((finding) => finding.source_kind === 'claim')) {
-      const { error } = await admin.from('reviews').update({ risk_tier: 'high' })
-        .eq('organization_id', review.organization_id).eq('id', review.id)
-      if (error) throw error
-    }
-    const { error: runError } = await admin.from('review_runs').insert({
-      organization_id: review.organization_id,
-      review_id: review.id,
-      requested_by: authData.user.id,
-      content_sha256: contentSha256,
-      rule_snapshot: ruleSnapshot,
-      claim_snapshot: claimSnapshot,
+    const result = commitResult as { status?: string; content_sha256?: string; assets_sha256?: string; input_sha256?: string }
+    if (result?.status === 'stale') return respondError(response, 409, 'The review changed during the check. Run it again.')
+    if (result?.status === 'rate_limited') return respondError(response, 429, 'Please wait before running this check again.')
+    if (result?.status === 'not_found') return respondError(response, 404, 'Review not found.')
+    if (result?.status === 'not_editable') return respondError(response, 409, 'This review cannot be checked.')
+    if (result?.status !== 'ok') throw new Error('Review run transaction returned an unexpected result.')
+
+    return response.status(200).json({
+      content_sha256: result.content_sha256,
+      assets_sha256: result.assets_sha256,
+      input_sha256: result.input_sha256,
+      findings,
       finding_count: findings.length,
-      engine_version: ENGINE_VERSION,
     })
-    if (runError) throw runError
-
-    const { error: eventError } = await admin.from('review_events').insert({
-      organization_id: review.organization_id,
-      review_id: review.id,
-      actor_id: authData.user.id,
-      action: 'checks_run',
-      detail: { content_sha256: contentSha256, finding_count: findings.length, engine_version: ENGINE_VERSION },
-      rule_set_version: review.rule_set_version,
-    })
-    if (eventError) throw eventError
-
-    return response.status(200).json({ content_sha256: contentSha256, findings, finding_count: findings.length })
   } catch (error) {
     console.error('Review run failed:', error)
     return respondError(response, 500, 'Review check could not be completed.')

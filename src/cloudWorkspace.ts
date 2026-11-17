@@ -58,7 +58,7 @@ export async function loadOrCreateWorkspace(user: User, selectedOrganizationId?:
     severity: titleCase(row.severity) as BrandRule['severity'], active: row.active, matchText: row.match_text,
   }))
   const claims = (claimsResult.data ?? []).map((row) => ({
-    id: row.id, statement: row.statement, evidence: row.evidence_label, evidenceUrl: row.evidence_url ?? undefined, owner: row.owner_label,
+    id: row.id, version: row.version, statement: row.statement, evidence: row.evidence_label, evidenceUrl: row.evidence_url ?? undefined, owner: row.owner_label,
     reviewDate: row.reviewed_at ?? '', expiryDate: row.expires_at ?? '', active: row.active,
   }))
   const data: AssayData = {
@@ -257,8 +257,15 @@ export async function saveWorkspaceData(organizationId: string, actorId: string,
         action: decision.action, reason: decision.reason, actor_id: actorId,
       })))
     if (newDecisions.length) {
-      const { error: insertError } = await supabase.from('review_decisions').upsert(newDecisions, { onConflict: 'id', ignoreDuplicates: true })
-      if (insertError) throw insertError
+      const { data: existing, error: readError } = await supabase.from('review_decisions')
+        .select('id').in('id', newDecisions.map((decision) => decision.id))
+      if (readError) throw readError
+      const existingIds = new Set((existing ?? []).map((decision) => decision.id))
+      const pendingDecisions = newDecisions.filter((decision) => !existingIds.has(decision.id))
+      if (pendingDecisions.length) {
+        const { error: insertError } = await supabase.from('review_decisions').insert(pendingDecisions)
+        if (insertError) throw insertError
+      }
     }
   }
 }

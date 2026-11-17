@@ -13,6 +13,8 @@ values
  ('10000000-0000-4000-8000-000000000004','authenticated','authenticated','brand-a@test.invalid','',now(),now()),
  ('10000000-0000-4000-8000-000000000005','authenticated','authenticated','legal-a@test.invalid','',now(),now()),
  ('10000000-0000-4000-8000-000000000006','authenticated','authenticated','creator-b@test.invalid','',now(),now()),
+ ('10000000-0000-4000-8000-000000000007','authenticated','authenticated','invite@test.invalid','',now(),now()),
+ ('10000000-0000-4000-8000-000000000008','authenticated','authenticated','expired@test.invalid','',now(),now()),
  ('20000000-0000-4000-8000-000000000001','authenticated','authenticated','owner-b@test.invalid','',now(),now())
 on conflict (id) do nothing;
 
@@ -27,7 +29,11 @@ insert into public.organization_members(organization_id,user_id,role) values
  ('a0000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000006','creator');
 
 insert into public.workspace_invitations(id,organization_id,email,role,token_hash,invited_by,expires_at)
-values ('b1000000-0000-4000-8000-000000000001','b0000000-0000-4000-8000-000000000001','invite@test.invalid','creator','hash-b','20000000-0000-4000-8000-000000000001',now()+interval '1 day');
+values
+ ('b1000000-0000-4000-8000-000000000001','b0000000-0000-4000-8000-000000000001','invite@test.invalid','creator',
+   encode(sha256(convert_to('test-invite-token-abcdefghijklmnopqrstuvwxyz','utf8')),'hex'),'20000000-0000-4000-8000-000000000001',now()+interval '1 day'),
+ ('b1000000-0000-4000-8000-000000000002','b0000000-0000-4000-8000-000000000001','expired@test.invalid','creator',
+   encode(sha256(convert_to('expired-invite-token-abcdefghijklmnopqrstuvwxyz','utf8')),'hex'),'20000000-0000-4000-8000-000000000001',now()-interval '1 day');
 insert into public.brand_rules(id,organization_id,rule_key,version,category,title,description,severity,status,active,created_by)
 values
  ('a2000000-0000-4000-8000-000000000001','a0000000-0000-4000-8000-000000000001','approved-a',1,'tone','Approved A','Visible approved rule','low','approved',true,'10000000-0000-4000-8000-000000000001'),
@@ -35,7 +41,9 @@ values
  ('a2000000-0000-4000-8000-000000000003','a0000000-0000-4000-8000-000000000001','retired-a',1,'tone','Retired A','Private retired rule','low','retired',false,'10000000-0000-4000-8000-000000000001'),
  ('b2000000-0000-4000-8000-000000000001','b0000000-0000-4000-8000-000000000001','rule-b',1,'tone','B rule','Private Org B rule','high','approved',true,'20000000-0000-4000-8000-000000000001');
 insert into public.approved_claims(id,organization_id,statement,evidence_label,owner_label,created_by)
-values ('b3000000-0000-4000-8000-000000000001','b0000000-0000-4000-8000-000000000001','B claim','B evidence','B owner','20000000-0000-4000-8000-000000000001');
+values
+ ('a3000000-0000-4000-8000-000000000002','a0000000-0000-4000-8000-000000000001','Approved fact','A evidence','A owner','10000000-0000-4000-8000-000000000001'),
+ ('b3000000-0000-4000-8000-000000000001','b0000000-0000-4000-8000-000000000001','B claim','B evidence','B owner','20000000-0000-4000-8000-000000000001');
 insert into public.reviews(id,organization_id,title,content,created_by)
 values
  ('a4000000-0000-4000-8000-000000000001','a0000000-0000-4000-8000-000000000001','Creator A review','Creator private copy','10000000-0000-4000-8000-000000000002'),
@@ -148,7 +156,7 @@ begin
         begin
           case table_name
             when 'organization_members' then insert into public.organization_members(organization_id,user_id,role) values (target_org,actor.id,'creator');
-            when 'workspace_invitations' then insert into public.workspace_invitations(organization_id,email,role,token_hash,invited_by,expires_at) values (target_org,actor.id::text||'@denied.invalid','creator',gen_random_uuid()::text,actor.id,now()+interval '1 day');
+            when 'workspace_invitations' then insert into public.workspace_invitations(organization_id,email,role,token_hash,invited_by,expires_at) values (target_org,actor.id::text||'@denied.invalid','creator',encode(sha256(convert_to(gen_random_uuid()::text,'utf8')),'hex'),actor.id,now()+interval '1 day');
             when 'brand_rules' then insert into public.brand_rules(organization_id,rule_key,version,category,title,description,severity,created_by) values (target_org,gen_random_uuid()::text,1,'tone','denied','denied','low',actor.id);
             when 'approved_claims' then insert into public.approved_claims(organization_id,statement,evidence_label,owner_label,created_by) values (target_org,'denied','denied','denied',actor.id);
             when 'reviews' then insert into public.reviews(organization_id,title,content,created_by) values (target_org,'denied','denied',actor.id);
@@ -329,15 +337,178 @@ $$;
 reset role;
 select set_config('request.jwt.claim.sub','',true);
 select set_config('request.jwt.claims','{}',true);
+update public.approved_claims set owner_label='Brand legal' where id='a3000000-0000-4000-8000-000000000002';
 do $$
 begin
+  if (select version from public.approved_claims where id='a3000000-0000-4000-8000-000000000002') <> 2 then
+    raise exception 'Claim updates did not increment the claim version';
+  end if;
+end;
+$$;
+insert into public.reviews(id,organization_id,title,content,created_by)
+values
+ ('a4000000-0000-4000-8000-000000000008','a0000000-0000-4000-8000-000000000001','Approval stale','Checked copy','10000000-0000-4000-8000-000000000002'),
+ ('a4000000-0000-4000-8000-000000000009','a0000000-0000-4000-8000-000000000001','Waiver stale','Waiver copy','10000000-0000-4000-8000-000000000002'),
+ ('a4000000-0000-4000-8000-000000000010','a0000000-0000-4000-8000-000000000001','Waiver asset stale','Asset waiver copy','10000000-0000-4000-8000-000000000002');
+insert into public.review_assets(id,organization_id,review_id,object_path,filename,mime_type,size_bytes,width,height,alt_text,palette,uploaded_by)
+values ('a9000000-0000-4000-8000-000000000020','a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000003',
+  'a0000000-0000-4000-8000-000000000001/a4000000-0000-4000-8000-000000000003/10000000-0000-4000-8000-000000000002/a9000000-0000-4000-8000-000000000020.png',
+  'missing-alt.png','image/png',1,100,100,'','[]','10000000-0000-4000-8000-000000000002');
+set local role service_role;
+select set_config('request.jwt.claim.sub','10000000-0000-4000-8000-000000000001',true);
+select set_config('request.jwt.claims','{"sub":"10000000-0000-4000-8000-000000000001","role":"service_role"}',true);
+do $$
+declare inputs jsonb; run_result jsonb; run_count bigint; finding_count bigint; event_count bigint;
+begin
+  inputs := public.assay_review_run_inputs('a4000000-0000-4000-8000-000000000003');
+  if inputs->>'content' <> 'New copy' then raise exception 'Server did not load the review content'; end if;
+  select count(*) into run_count from public.review_runs where review_id='a4000000-0000-4000-8000-000000000003';
+  select count(*) into finding_count from public.review_findings where review_id='a4000000-0000-4000-8000-000000000003';
+  select count(*) into event_count from public.review_events where review_id='a4000000-0000-4000-8000-000000000003';
+  run_result := public.assay_commit_review_run(
+    'a4000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000002',
+    repeat('0',64),inputs->>'assets_sha256',inputs->>'input_sha256','[]','[]','[]',inputs->'assets','test-engine'
+  );
+  if run_result->>'status' <> 'stale' then raise exception 'Stale content was not rejected'; end if;
+  if (select count(*) from public.review_runs where review_id='a4000000-0000-4000-8000-000000000003') <> run_count
+    or (select count(*) from public.review_findings where review_id='a4000000-0000-4000-8000-000000000003') <> finding_count
+    or (select count(*) from public.review_events where review_id='a4000000-0000-4000-8000-000000000003') <> event_count then
+    raise exception 'Stale run wrote findings, a run, or an event';
+  end if;
+
+  run_result := public.assay_commit_review_run(
+    'a4000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000002',
+    inputs->>'content_sha256',inputs->>'assets_sha256',inputs->>'input_sha256',
+    jsonb_build_array(jsonb_build_object(
+      'finding_key','server-test-finding','source_kind','rule',
+      'rule_id','a2000000-0000-4000-8000-000000000001','claim_id',null,
+      'category','tone','severity','low','state','likely','title','Server finding',
+      'excerpt','New copy','explanation','Created in the atomic run transaction','confidence',null
+    ),jsonb_build_object(
+      'finding_key','server-image-finding','source_kind','image_check',
+      'rule_id',null,'claim_id',null,'category','accessibility','severity','high',
+      'state','violation','title','Add descriptive alt text',
+      'excerpt','missing-alt.png','explanation','Server image finding','confidence',null
+    )),
+    jsonb_build_array(jsonb_build_object(
+      'id','a2000000-0000-4000-8000-000000000001','rule_key','approved-a','version',1,
+      'category','tone','title','Approved A','description','Visible approved rule',
+      'source_label',null,'severity','low','match_text',null,'text_sha256',repeat('a',64)
+    )),
+    jsonb_build_array(jsonb_build_object(
+      'id','a3000000-0000-4000-8000-000000000002','version',2,
+      'statement','Approved fact','value',null,'evidence_label','A evidence',
+      'evidence_url',null,'owner_label','Brand legal','reviewed_at',null,
+      'expires_at',null,'active',true,'text_sha256',repeat('b',64)
+    )),
+    inputs->'assets','test-engine'
+  );
+  if run_result->>'status' <> 'ok' then raise exception 'Atomic review run did not succeed'; end if;
+  if not exists (select 1 from public.review_runs where review_id='a4000000-0000-4000-8000-000000000003'
+    and snapshot_version=1 and jsonb_array_length(asset_snapshot)=1
+    and asset_snapshot->0->>'id'='a9000000-0000-4000-8000-000000000020') then raise exception 'Run snapshot omitted asset state'; end if;
+  if not exists (select 1 from public.review_runs where review_id='a4000000-0000-4000-8000-000000000003'
+    and rule_snapshot->0->>'version'='1' and rule_snapshot->0->>'text_sha256'=repeat('a',64)
+    and claim_snapshot->0->>'version'='2' and claim_snapshot->0->>'text_sha256'=repeat('b',64)) then
+    raise exception 'Run snapshot omitted rule or claim versions and text hashes';
+  end if;
+  if not exists (select 1 from public.review_findings where review_id='a4000000-0000-4000-8000-000000000003'
+    and finding_key='server-test-finding') then raise exception 'Atomic run omitted its finding'; end if;
+  if not exists (select 1 from public.review_findings where review_id='a4000000-0000-4000-8000-000000000003'
+    and finding_key='server-image-finding' and source_kind='image_check') then raise exception 'Atomic run omitted its image finding'; end if;
+end;
+$$;
+reset role;
+delete from private.review_run_rate_limits where review_id='a4000000-0000-4000-8000-000000000003';
+set local role service_role;
+select set_config('request.jwt.claim.sub','10000000-0000-4000-8000-000000000001',true);
+select set_config('request.jwt.claims','{"sub":"10000000-0000-4000-8000-000000000001","role":"service_role"}',true);
+do $$
+declare inputs jsonb; run_result jsonb;
+begin
+  inputs := public.assay_review_run_inputs('a4000000-0000-4000-8000-000000000003');
+  run_result := public.assay_commit_review_run(
+    'a4000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000002',
+    inputs->>'content_sha256',inputs->>'assets_sha256',inputs->>'input_sha256',
+    jsonb_build_array(jsonb_build_object(
+      'finding_key','server-image-finding','source_kind','image_check',
+      'rule_id',null,'claim_id',null,'category','accessibility','severity','high',
+      'state','violation','title','Add descriptive alt text',
+      'excerpt','missing-alt.png','explanation','Recomputed image finding','confidence',null
+    )),
+    '[]',
+    jsonb_build_array(jsonb_build_object(
+      'id','a3000000-0000-4000-8000-000000000002','version',2,
+      'statement','Approved fact','value',null,'evidence_label','A evidence',
+      'evidence_url',null,'owner_label','Brand legal','reviewed_at',null,
+      'expires_at',null,'active',true,'text_sha256',repeat('b',64)
+    )),
+    inputs->'assets','test-engine'
+  );
+  if run_result->>'status' <> 'ok' then raise exception 'Image checks could not be recomputed'; end if;
+  if exists (select 1 from public.review_findings where review_id='a4000000-0000-4000-8000-000000000003'
+    and finding_key='server-test-finding') then raise exception 'Stale rule finding was not removed'; end if;
+  if not exists (select 1 from public.review_findings where review_id='a4000000-0000-4000-8000-000000000003'
+    and finding_key='server-image-finding' and source_kind='image_check') then raise exception 'Image finding disappeared on rerun'; end if;
+end;
+$$;
+reset role;
+select set_config('request.jwt.claim.sub','',true);
+select set_config('request.jwt.claims','{}',true);
+do $$
+declare inputs jsonb; run_result jsonb; run_input record;
+begin
   if auth.uid() is not null then raise exception 'Server test context still has a user identity'; end if;
-end $$;
-insert into public.review_runs(organization_id,review_id,requested_by,content_sha256,rule_snapshot,finding_count,engine_version)
-values ('a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000002',encode(sha256(convert_to('New copy','utf8')),'hex'),'[]',0,'test');
-insert into public.review_findings(organization_id,review_id,finding_key,source_kind,rule_id,category,severity,state,title,explanation)
-values ('a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000003','server-test-finding','rule','a2000000-0000-4000-8000-000000000001','tone','low','likely','Server finding','Created by the server');
-delete from public.review_findings where organization_id='a0000000-0000-4000-8000-000000000001' and review_id='a4000000-0000-4000-8000-000000000003' and finding_key='server-test-finding';
+
+  insert into public.review_findings(organization_id,review_id,finding_key,source_kind,rule_id,category,severity,state,title,explanation)
+  values ('a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000003','server-direct-finding','rule',
+    'a2000000-0000-4000-8000-000000000001','tone','low','likely','Server finding','Created by postgres');
+  delete from public.review_findings where review_id='a4000000-0000-4000-8000-000000000003'
+    and finding_key='server-direct-finding';
+  if not found then raise exception 'Postgres could not delete a finding'; end if;
+end;
+$$;
+set local role service_role;
+select set_config('request.jwt.claim.sub','10000000-0000-4000-8000-000000000001',true);
+select set_config('request.jwt.claims','{"sub":"10000000-0000-4000-8000-000000000001","role":"service_role"}',true);
+do $$
+declare inputs jsonb; run_result jsonb; run_input record;
+begin
+  for run_input in
+    select * from (values
+      ('a4000000-0000-4000-8000-000000000004'::uuid,'10000000-0000-4000-8000-000000000003'::uuid),
+      ('a4000000-0000-4000-8000-000000000008'::uuid,'10000000-0000-4000-8000-000000000002'::uuid),
+      ('a4000000-0000-4000-8000-000000000009'::uuid,'10000000-0000-4000-8000-000000000002'::uuid),
+      ('a4000000-0000-4000-8000-000000000010'::uuid,'10000000-0000-4000-8000-000000000002'::uuid)
+    ) as fixtures(review_id,requested_by)
+  loop
+    inputs := public.assay_review_run_inputs(run_input.review_id);
+    run_result := public.assay_commit_review_run(
+      run_input.review_id,run_input.requested_by,
+      inputs->>'content_sha256',inputs->>'assets_sha256',inputs->>'input_sha256','[]','[]','[]',inputs->'assets','test-engine'
+    );
+    if run_result->>'status' <> 'ok' then raise exception 'Could not create fixture review run'; end if;
+  end loop;
+end;
+$$;
+do $$
+declare result jsonb; invite_hash text; expired_hash text;
+begin
+  invite_hash := encode(sha256(convert_to('test-invite-token-abcdefghijklmnopqrstuvwxyz','utf8')),'hex');
+  expired_hash := encode(sha256(convert_to('expired-invite-token-abcdefghijklmnopqrstuvwxyz','utf8')),'hex');
+  result := public.assay_accept_workspace_invitation(invite_hash,'10000000-0000-4000-8000-000000000007','wrong@test.invalid');
+  if result->>'status' <> 'invalid' then raise exception 'Invitation email mismatch was accepted'; end if;
+  result := public.assay_accept_workspace_invitation(expired_hash,'10000000-0000-4000-8000-000000000008','expired@test.invalid');
+  if result->>'status' <> 'invalid' then raise exception 'Expired invitation was accepted'; end if;
+  result := public.assay_accept_workspace_invitation(invite_hash,'10000000-0000-4000-8000-000000000007','invite@test.invalid');
+  if result->>'status' <> 'accepted' or result->>'role' <> 'creator' then raise exception 'Valid invitation was not accepted with its invited role'; end if;
+  if not exists (select 1 from public.organization_members where organization_id='b0000000-0000-4000-8000-000000000001'
+    and user_id='10000000-0000-4000-8000-000000000007' and role='creator') then raise exception 'Invitation membership was not created'; end if;
+  result := public.assay_accept_workspace_invitation(invite_hash,'10000000-0000-4000-8000-000000000007','invite@test.invalid');
+  if result->>'status' <> 'accepted' then raise exception 'Invitation acceptance retry was not idempotent'; end if;
+end;
+$$;
+reset role;
 set local role authenticated;
 do $$
 declare denied boolean; changed_count bigint;
@@ -345,6 +516,7 @@ begin
   perform set_config('request.jwt.claim.sub','10000000-0000-4000-8000-000000000002',true);
   perform set_config('request.jwt.claims','{"sub":"10000000-0000-4000-8000-000000000002","role":"authenticated"}',true);
   update public.reviews set status='submitted' where id='a4000000-0000-4000-8000-000000000003';
+  if not public.assay_review_has_current_run('a4000000-0000-4000-8000-000000000003') then raise exception 'Current run was not recognized'; end if;
   if (select jsonb_array_length(rule_snapshot) from public.reviews where id='a4000000-0000-4000-8000-000000000003') <> 1 then raise exception 'Submission did not snapshot approved rule ID/version'; end if;
   denied := false;
   changed_count := 0;
@@ -367,11 +539,26 @@ begin
   if (select count(*) from public.review_comments where visibility='internal') <> 1 then raise exception 'Reviewer cannot read internal notes'; end if;
   denied := false;
   begin insert into public.workspace_invitations(organization_id,email,role,token_hash,invited_by,expires_at)
-    values ('a0000000-0000-4000-8000-000000000001','legal-invite@test.invalid','legal_reviewer','manager-legal-test','10000000-0000-4000-8000-000000000003',now()+interval '1 day');
+    values ('a0000000-0000-4000-8000-000000000001','legal-invite@test.invalid','legal_reviewer',
+      encode(sha256(convert_to('manager-legal-test','utf8')),'hex'),'10000000-0000-4000-8000-000000000003',now()+interval '1 day');
   exception when insufficient_privilege then denied := true; end;
   if not denied then raise exception 'Manager invited a legal reviewer'; end if;
   insert into public.review_decisions(organization_id,review_id,finding_key,finding_title,action,reason,actor_id)
     values ('a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000006','seed-high-finding','High finding','dismissed','Manager reviewed the evidence','10000000-0000-4000-8000-000000000003');
+
+  update public.reviews set status='submitted' where id='a4000000-0000-4000-8000-000000000008';
+  update public.reviews set content='Changed after the checked run' where id='a4000000-0000-4000-8000-000000000008';
+  perform set_config('request.jwt.claim.sub','10000000-0000-4000-8000-000000000005',true);
+  perform set_config('request.jwt.claims','{"sub":"10000000-0000-4000-8000-000000000005","role":"authenticated"}',true);
+  denied := false;
+  begin update public.reviews set status='approved' where id='a4000000-0000-4000-8000-000000000008';
+  exception when insufficient_privilege then denied := true; end;
+  if not denied then raise exception 'Legal approved content changed after the run'; end if;
+
+  perform set_config('request.jwt.claim.sub','10000000-0000-4000-8000-000000000003',true);
+  perform set_config('request.jwt.claims','{"sub":"10000000-0000-4000-8000-000000000003","role":"authenticated"}',true);
+  update public.reviews set status='submitted' where id='a4000000-0000-4000-8000-000000000009';
+  update public.reviews set status='submitted' where id='a4000000-0000-4000-8000-000000000010';
 
   -- Manager cannot approve their own review; high risk requires legal/admin approval.
   update public.reviews set status='submitted' where id='a4000000-0000-4000-8000-000000000004';
@@ -396,6 +583,10 @@ begin
   if not denied then raise exception 'Content changed during approval'; end if;
   update public.reviews set status='approved' where id='a4000000-0000-4000-8000-000000000003';
   if (select approved_content_sha256 from public.reviews where id='a4000000-0000-4000-8000-000000000003') <> encode(sha256(convert_to('New copy','utf8')),'hex') then raise exception 'Approved content hash was not stored'; end if;
+  denied := false;
+  begin update public.reviews set approved_content_sha256=repeat('0',64) where id='a4000000-0000-4000-8000-000000000003';
+  exception when insufficient_privilege then denied := true; end;
+  if not denied then raise exception 'Approved content hash was overwritten'; end if;
   update public.reviews set status='waived',waiver_reason='Temporary exception',waiver_expires_at=current_date+30 where id='a4000000-0000-4000-8000-000000000004';
   denied := false;
   begin update public.reviews set content='Edited after waiver' where id='a4000000-0000-4000-8000-000000000004';
@@ -458,6 +649,74 @@ begin
   perform set_config('request.jwt.claims','{"sub":"10000000-0000-4000-8000-000000000003","role":"authenticated"}',true);
   if (select owner_id from public.organizations where id='a0000000-0000-4000-8000-000000000001') <> '10000000-0000-4000-8000-000000000003'::uuid then raise exception 'Ownership transfer failed'; end if;
   if (select count(*) from public.organization_events where organization_id='a0000000-0000-4000-8000-000000000001' and action='ownership_transferred') <> 1 then raise exception 'Ownership transfer was not audited'; end if;
+end;
+$$;
+
+reset role;
+select set_config('request.jwt.claim.sub','',true);
+select set_config('request.jwt.claims','{}',true);
+insert into public.review_assets(id,organization_id,review_id,object_path,filename,mime_type,size_bytes,width,height,uploaded_by)
+values ('a9000000-0000-4000-8000-000000000021','a0000000-0000-4000-8000-000000000001','a4000000-0000-4000-8000-000000000010',
+  'a0000000-0000-4000-8000-000000000001/a4000000-0000-4000-8000-000000000010/10000000-0000-4000-8000-000000000002/a9000000-0000-4000-8000-000000000021.png',
+  'waiver-asset.png','image/png',1,100,100,'10000000-0000-4000-8000-000000000002');
+set local role authenticated;
+do $$
+declare denied boolean;
+begin
+  perform set_config('request.jwt.claim.sub','10000000-0000-4000-8000-000000000005',true);
+  perform set_config('request.jwt.claims','{"sub":"10000000-0000-4000-8000-000000000005","role":"authenticated"}',true);
+  if public.assay_review_has_current_run('a4000000-0000-4000-8000-000000000010') then
+    raise exception 'Asset change did not stale the run';
+  end if;
+  denied := false;
+  begin update public.reviews set status='waived',waiver_reason='Temporary exception',waiver_expires_at=current_date+30
+    where id='a4000000-0000-4000-8000-000000000010';
+  exception when insufficient_privilege then denied := true; end;
+  if not denied then raise exception 'Legal waived a review after its assets changed'; end if;
+end;
+$$;
+reset role;
+select set_config('request.jwt.claim.sub','',true);
+select set_config('request.jwt.claims','{}',true);
+insert into public.reviews(id,organization_id,title,content,created_by,created_at)
+select ('d4000000-0000-4000-8000-'||lpad(page_number::text,12,'0'))::uuid,
+  'a0000000-0000-4000-8000-000000000001',
+  'pagination-'||page_number,
+  'pagination content',
+  '10000000-0000-4000-8000-000000000001',
+  '2026-01-01 00:00:00+00'::timestamptz
+from generate_series(1,51) page_number;
+do $$
+declare
+  cursor_created_at timestamptz;
+  cursor_id uuid;
+  page_ids uuid[];
+  all_ids uuid[] := '{}'::uuid[];
+  distinct_count bigint;
+begin
+  loop
+    select array_agg(page.id order by page.created_at desc, page.id desc)
+      into page_ids
+      from (
+        select r.id, r.created_at
+        from public.reviews r
+        where r.organization_id='a0000000-0000-4000-8000-000000000001'
+          and r.title like 'pagination-%'
+          and (cursor_created_at is null
+            or r.created_at < cursor_created_at
+            or (r.created_at = cursor_created_at and r.id < cursor_id))
+        order by r.created_at desc, r.id desc
+        limit 25
+      ) page;
+    exit when coalesce(cardinality(page_ids),0)=0;
+    all_ids := all_ids || page_ids;
+    cursor_id := page_ids[cardinality(page_ids)];
+    select r.created_at into cursor_created_at from public.reviews r where r.id=cursor_id;
+  end loop;
+  select count(distinct ids.id) into distinct_count from unnest(all_ids) as ids(id);
+  if cardinality(all_ids) <> 51 or distinct_count <> 51 then
+    raise exception 'Keyset pagination skipped or repeated reviews with duplicate timestamps';
+  end if;
 end;
 $$;
 
